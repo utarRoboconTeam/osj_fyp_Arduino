@@ -18,7 +18,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <WiFi.h>
-#include <CAN.h>
+#include <ESP32-TWAI-CAN.hpp>
 #include <FastLED.h>
 #include <TinyGPSPlus.h>
 #include <SoftwareSerial.h>
@@ -63,14 +63,14 @@
 // ||==============================||
 // ESP-NOW
 enum deviceID { BASE_TELEOP, BASE_TELEM }; // Enumeration (to differentiate between which controller board sends out what data)
-uint8_t chan = 3; // <======= NOTE! Check if the selected ESP-NOW channel is quiet or not
+uint8_t chan = 5; // <======= NOTE! Check if the selected ESP-NOW channel is quiet or not
 
 
 // CAN bus
 // CAN message ID, used for differentiating the type of driving mode in this case
 // 1 - Open loop control
 // 2 - Closed loop control
-int msgID = 2;  
+int msgID = 0x0001;  
 
 
 // Addressable LEDs
@@ -186,7 +186,8 @@ esp_now_peer_info_t peerInfo;
 CRGB leds[LED_NUM];
 TinyGPSPlus gps;  // The TinyGPSPlus object
 SoftwareSerial gpsSerial(RXPin, TXPin);  // The serial connection to the GPS device
-
+CanFrame txFrame = { 0 };
+CanFrame rxFrame;
 
 // ||==============================||
 // ||           FUNCTIONS          ||
@@ -494,19 +495,12 @@ void setup() {
   // ==============
   //    CAN Bus 
   // ==============
-  CAN.setPins(RX, TX);  // Set the CAN pins to communicate with the CAN Tranceiver
-
-  // start the CAN bus at 125 kbps
-  if (!CAN.begin(125E3)) {
-    Serial.println("Starting CAN failed!");
-    // forever loop if fails, you need to reset the microcontroller
-    // the onboard LED will repeatedly blink every second
-    while (1){
-      digitalWrite(flLEDPin, HIGH);
-      delay(1000);
-      digitalWrite(flLEDPin, LOW);
-      delay(1000);
-    }  
+  // or override everything in one command;
+  // It is also safe to use .begin() without .end() as it calls it internally
+  if(ESP32Can.begin(ESP32Can.convertSpeed(500), TX, RX, 10, 10)) {
+      Serial.println("CAN bus started!");
+  } else {
+      Serial.println("CAN bus failed!");
   }
 
 
@@ -679,7 +673,7 @@ void loop() {
     wasSwitchedToManual = true;
     skidSteeringKinematics(y, w, &FLW, &FRW, &BLW, &BRW);
 
-    msgID = 2;
+    msgID = 0x0001;
     PFLW = abs(FLW);
     PFRW = abs(FRW);
     PBLW = abs(BLW);
@@ -710,17 +704,19 @@ void loop() {
   }
 
   // DO NOT PUT NON-BLOCKING DELAY FOR THIS, LET IT RUN AS FAST AS IT CAN
-  CAN.beginPacket(msgID);  // Start the data packet writing
-  CAN.write(PFLW);         // Front left wheel speed
-  CAN.write(PFRW);         // Front right wheel speed
-  CAN.write(PBLW);         // Back left wheel speed
-  CAN.write(PBRW);         // Back right wheel speed
-  CAN.write(DFLW);         // Front left wheel direction
-  CAN.write(DFRW);         // Front right wheel direction
-  CAN.write(DBLW);         // Back left wheel direction
-  CAN.write(DBRW);         // Back right wheel direction
-  CAN.endPacket();         // end the data packet writing and send it    
+  txFrame.identifier = (msgID);
+  txFrame.extd = 0;
+  txFrame.data_length_code = 8;
+  txFrame.data[0] = (PFLW);         // Front left wheel speed
+  txFrame.data[1] = (PFRW);         // Front right wheel speed
+  txFrame.data[2] = (PBLW);         // Back left wheel speed
+  txFrame.data[3] = (PBRW);         // Back right wheel speed
+  txFrame.data[4] = (DFLW);         // Front left wheel direction
+  txFrame.data[5] = (DFRW);         // Front right wheel direction
+  txFrame.data[6] = (DBLW);         // Back left wheel direction
+  txFrame.data[7] = (DBRW);         // Back right wheel direction
 
+  ESP32Can.writeFrame(txFrame);  // timeout defaults to 1 ms
 
 
   // Send odometry and other data to PC via serial

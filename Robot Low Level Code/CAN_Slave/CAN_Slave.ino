@@ -15,27 +15,29 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <WiFi.h>
-#include <CAN.h>
-
+#include <ESP32-TWAI-CAN.hpp>
 
 // ||==============================||
 // ||          DEFINITIONS         ||
 // ||==============================||
 // CAN bus pins
-#define RX 26  // Connect to RX Pin of the CAN module
-#define TX 27  // connect to TX Pin of the CAN module
+#define RX 23  // Connect to RX Pin of the CAN module
+#define TX 32  // connect to TX Pin of the CAN module
+
+#define TX_ID_1 0x601
+#define TX_ID_2 0x602
+#define RX_ID_1 0x581
+#define RX_ID_2 0x582
+
 
 // Time constants
 #define DC_TIMEFRAME 1000  // 1000 ms
 #define PID_TIMEFRAME 50000 // 50 ms
 
 // DC Motor constants
-#define motorMaxRPM 1400  // RPM
+#define motorMaxRPM 300  // RPM
 #define motorMinPWM 0
 #define noOfMotors 4
-#define pulsePerMotorRev 5
-#define internalGearRatio 4 // 1 to 4
-#define externalGearRatio 1
 
 
 // ||==============================||
@@ -47,36 +49,17 @@ bool pidTune = false; // Live PID tuning
 
 
 // ESP-NOW
-enum deviceID { BASE_TELEOP, ARM_TELEOP, BASE_TELEM, ARM_TELEM }; // Enumeration (to differentiate between which controller board sends out what data)
-uint8_t chan = 3; // To prevent interference-induced lagging, might want to switch to another channel (0 to 11);
+enum deviceID { BASE_TELEOP, BASE_TELEM }; // Enumeration (to differentiate between which controller board sends out what data)
+uint8_t chan = 5; // To prevent interference-induced lagging, might want to switch to another channel (0 to 11);
 uint8_t broadcastAddress[] = { 0xF4, 0x12, 0xFA, 0xE7, 0xA0, 0x8C };  // Remote controller MAC Address
 
 
 // CAN bus
 // data array to store the parameters
-int data[8];
-int CANIndex = 0;
 uint8_t canID = 0;
 
 
 // DC Motor
-// GPIO pins
-int ENCA[noOfMotors] = { 22, 25, 32, 13 };  // encoder A on the motor
-int ENCB[noOfMotors] = { 21, 12, 23, 19 };  // encoder B on the motor
-int PWM[noOfMotors] = { 16, 4, 5, 2 };      // PWM data
-int DIR[noOfMotors] = { 14, 17, 18, 33 };   // Direction data
-
-volatile int counter[noOfMotors] = { 0, 0, 0, 0 };  // Encoder pulses
-
-// Motor constant calculation
-// different motor has different constant of n output shaft / m pulses
-// please calculate yours by looking up these parameters in your motor datasheet and calculate using the formula below
-// 1) no of pulses in 1 motor shaft
-// 2) gearbox gear ratio
-// 3) external gear ratio
-// [constant] = (p no. of pulses / 1 motor shaft rotation) * (gearbox gear ratio (basically q no. of motor shaft rotations / 1 output shaft rotation)) * ([optional] output gear ratio, only implement if you have external gearing)
-float motorConstant = pulsePerMotorRev * internalGearRatio * externalGearRatio;  // in pulses per output shaft rotation
-
 // PID control
 // Speed and direction input and output
 int target[noOfMotors] = { 0, 0, 0, 0 };          // target speed of the motor in PWM
@@ -161,37 +144,12 @@ typedef struct ESP32TELE {
 } ESP32TELE;
 
 ESP32TELE base; // ESP-NOW message structure object
-
+CanFrame txFrame = { 0 };
+CanFrame rxFrame;
 
 // ||==============================||
 // ||           FUNCTIONS          ||
 // ||==============================||
-
-//====================== INTERRUPT SERVICE ROUTINES ==========================
-
-// Front left wheel encoder
-void IRAM_ATTR readEncoderFLW() {
-  //Serial.println("ENCA Triggered on encoder 1");
-  counter[0]++;
-}
-
-// Front right wheel encoder
-void IRAM_ATTR readEncoderFRW() {
-  //Serial.println("ENCA Triggered on encoder 2");
-  counter[1]++;
-}
-
-// Back left wheel encoder
-void IRAM_ATTR readEncoderBLW() {
-  //Serial.println("ENCB Triggered on encoder 3");
-  counter[2]++;
-}
-
-// Back right wheel encoder
-void IRAM_ATTR readEncoderBRW() {
-  //Serial.println("ENCB Triggered on encoder 4");
-  counter[3]++;
-}
 
 
 //====================== CALLBACK FUNCTIONS ==========================
@@ -225,139 +183,213 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 
 //====================== TASK FUNCTIONS ==========================
 
+void canSendSDO(uint16_t nodeID, int byteLength, uint16_t index, uint8_t subIndex, int32_t value){
+  // DO NOT PUT NON-BLOCKING DELAY FOR THIS, LET IT RUN AS FAST AS IT CAN
+
+  // we are writing to the driver, so set the identifier to the transmit id
+  txFrame.identifier = nodeID;
+
+  txFrame.extd = 0;
+  txFrame.data_length_code = 8;
+  //Serial.print("Beginning packet at: ");
+  //Serial.println(TX_ID, HEX);
+  
+  // Command word, here we only specify the length of data to be sent
+  switch(byteLength){
+    case -1:  // arbitrary command to perform read request
+      txFrame.data[0] = (0x40);
+      break;
+    case 1: // 1 byte long of data
+      txFrame.data[0] = (0x2F);      
+      break;
+    case 2: // 2 bytes long of data
+      txFrame.data[0] = (0x2B);
+      break;
+    case 3: // 3 bytes long of data
+      txFrame.data[0] = (0x27);
+      break;
+    case 4: // 4 bytes long of data
+      txFrame.data[0] = (0x23);
+      break;
+    default:  // out of range from datasheet
+      txFrame.data[0] = (0x23);  // default it back to 4 bytes
+      break;
+  }
+
+  // the index to send the data to
+  txFrame.data[1] = (uint8_t)(index & 0xFF); // low byte
+  // Serial.print("Writing lower byte of index");
+  // Serial.println(index & 0xFF, HEX);
+
+  txFrame.data[2] = (uint8_t)(index >> 8); // high byte
+  // Serial.print("Writing higher byte of index");
+  // Serial.println(index >> 8, HEX);
+
+
+  // the subindex to send the data to
+  txFrame.data[3] = (subIndex);
+  //Serial.println("Selecting subindex");
+
+
+  // Command word, here we only specify the length of data to be sent
+  switch(byteLength){
+    case -1:
+      txFrame.data[4] = 0; // byte 1
+      txFrame.data[5] = 0; // byte 2
+      txFrame.data[6] = 0; // byte 3
+      txFrame.data[7] = 0; // byte 4
+      break;
+    case 1: // 1 byte long of data
+      // the data
+      txFrame.data[4] = ((uint8_t)(value & 0xFF)); // byte 1
+      //Serial.println("Writing the data");
+      break;
+    case 2: // 2 bytes long of data
+      // the data
+      txFrame.data[4] = ((uint8_t)(value & 0xFF)); // byte 1
+      txFrame.data[5] = ((uint8_t)(value >> 8) & 0xFF); // byte 2
+      //Serial.println("Writing the data");
+      break;
+    case 3: // 3 bytes long of data
+      // the data
+      txFrame.data[4] = ((uint8_t)(value & 0xFF)); // byte 1
+      txFrame.data[5] = ((uint8_t)(value >> 8) & 0xFF); // byte 2
+      txFrame.data[6] = ((uint8_t)(value >> 16) & 0xFF); // byte 3
+      //Serial.println("Writing the data");
+      break;
+    case 4: // 4 bytes long of data
+      // the data
+      txFrame.data[4] = ((uint8_t)(value & 0xFF)); // byte 1
+      txFrame.data[5] = ((uint8_t)(value >> 8) & 0xFF); // byte 2
+      txFrame.data[6] = ((uint8_t)(value >> 16) & 0xFF); // byte 3
+      txFrame.data[7] = ((uint8_t)(value >> 24) & 0xFF); // byte 4
+      //Serial.println("Writing the data");
+      break;
+    default:  // out of range from datasheet
+      // the data
+      txFrame.data[4] = ((uint8_t)(value & 0xFF)); // byte 1
+      txFrame.data[5] = ((uint8_t)(value >> 8) & 0xFF); // byte 2
+      txFrame.data[6] = ((uint8_t)(value >> 16) & 0xFF); // byte 3
+      txFrame.data[7] = ((uint8_t)(value >> 24) & 0xFF); // byte 4
+      //Serial.println("Writing the data");
+      break;
+  }
+
+
+  ESP32Can.writeFrame(txFrame);  // timeout defaults to 1 ms
+  //Serial.println("Done. Sending packet...");
+
+
+}
+
+void canReceiveSDO(){
+  // You can set custom timeout, default is 1000
+  if(ESP32Can.readFrame(rxFrame, 1000)) {
+      // Comment out if too many frames
+      Serial.printf("Received frame: %03X  \r\n", rxFrame.identifier);
+      Serial.print(rxFrame.data[0], HEX);
+      Serial.print(" ");
+      Serial.print(rxFrame.data[1], HEX);
+      Serial.print(" ");
+      Serial.print(rxFrame.data[2], HEX);
+      Serial.print(" ");
+      Serial.print(rxFrame.data[3], HEX);
+      Serial.print(" ");
+      Serial.print(rxFrame.data[4], HEX);
+      Serial.print(" ");
+      Serial.print(rxFrame.data[5], HEX);
+      Serial.print(" ");
+      Serial.print(rxFrame.data[6], HEX);
+      Serial.print(" ");
+      Serial.print(rxFrame.data[7], HEX);
+      Serial.print(" ");
+  }
+}
+
 // Get command velocities from main controller via CAN bus
 void readCmdVel(){
 
   // check for incoming CAN data. If there is, parse the data packet
-  CANIndex = 0;
-  int packetSize = CAN.parsePacket();
-
-  // If there is CAN data parsed, assign them to the data array accordingly
-  if (packetSize) {
-    while (CAN.available()) {
-      data[CANIndex] = CAN.read();
-      canID = CAN.packetId();
-      CANIndex++;
-
-      // Uncomment the line below to show the data received
-
-      // for (int i = 0; i < packetSize; i++){
-      //   Serial.print(data[i]);
-      //   Serial.print(" ");
-      // }
-      // Serial.println();
+  if(ESP32Can.readFrame(rxFrame, 0)) {
+    if (rxFrame.identifier == 0x0001){
+      for (int i = 0; i < noOfMotors; i++){
+        // if you are using those bldc motors purchased on Taobao
+        // They have a deadzone where the input within that deadzone will not move the motor
+        // so we need to offset it
+        target[i] = map(rxFrame.data[i], 0, 255, motorMinPWM, 255); 
+        mappedTarget[i] =  map(abs(target[i]), motorMinPWM, 255, 0, motorMaxRPM);
+        direction[i] = ((rxFrame.data[i + 4] == 0) ? -1 : 1);      
+      }
+      gotCmdVelData = true;
     }
-  
-    for (int i = 0; i < noOfMotors; i++){
-      // if you are using those bldc motors purchased on Taobao
-      // They have a deadzone where the input within that deadzone will not move the motor
-      // so we need to offset it
-      target[i] = map(data[i], 0, 255, motorMinPWM, 255); 
-      mappedTarget[i] =  map(abs(target[i]), motorMinPWM, 255, 0, motorMaxRPM);
-      direction[i] = ((data[i + 4] == 0) ? false : true);      
-    }
-    gotCmdVelData = true;
   }
 
-  // No CAN data
+  // No CAN data  
   else{
     gotCmdVelData = false;
   }
+
 }
 
-// Open loop control of motor
-// Good for testing whether your motors are responding to your command velocities correctly or not
-// before you proceed to closed loop control
-void openLoopMotorCtrl(){
-  for (int i = 0; i < noOfMotors; i++) {
-    if (!direction[i]) {
-      digitalWrite(DIR[i], HIGH);
-    } else {
-      digitalWrite(DIR[i], LOW);
-    }
-    ledcWrite(i, abs(target[i]));
-  }
+void sendCmdVel(){
+  Serial.print(target[0] * direction[0]);
+  Serial.print(" ");
+  Serial.println(target[1] * direction[1]);
+  canSendSDO(TX_ID_1, 4, 0x60FF, 0x01, target[0] * direction[0]);
+  canSendSDO(TX_ID_1, 4, 0x60FF, 0x02, target[1] * direction[1]);
+  //canSendSDO(TX_ID_2, 4, 0x60FF, 0x01, target[2] * direction[2]);
+  //canSendSDO(TX_ID_2, 4, 0x60FF, 0x02, target[3] * direction[3]);
 }
 
-// Closed loop control of motors
-// To ensure the motor speeds are being driven at the right speed
-void closedLoopMotorCtrl(){
 
-  int getCounter[noOfMotors] = { 0, 0, 0, 0 };
-  static int prevCounter[noOfMotors] = { 0, 0, 0, 0 };
-  
-  for (int i = 0; i < noOfMotors; i++) {
-    unsigned long currMillis = micros();
-    // Indicate that we have performed PID control for all motors for this round
-    if (i >= 2){
-      allMotorsDone = true;
-    }
+void readWheelSpeeds(){
+  canSendSDO(TX_ID_1, -1, 0x60FF, 0x01, 0x00);
+  canReceiveSDO();
+  canSendSDO(TX_ID_1, -1, 0x60FF, 0x02, 0x00);
+  canReceiveSDO();
+  canSendSDO(TX_ID_2, -1, 0x60FF, 0x01, 0x00);
+  canReceiveSDO();
+  canSendSDO(TX_ID_2, -1, 0x60FF, 0x02, 0x00);
+  canReceiveSDO();
+}
 
-    // Run the PID control within a timeframe
-    if (currMillis - prevPIDMillis[i] >= PID_TIMEFRAME){
-      noInterrupts();
-      getCounter[i] = counter[i];
-      interrupts();
+void driverStartup(){
 
-      // Calculate how many pulses have been recorded per second
-      clCtrlTimeElapsed[i] = ((float) (currMillis - prevCLCtrlTime[i])) / 1.0e6;
-      velRaw[i] = (getCounter[i] - prevCounter[i]) / clCtrlTimeElapsed[i];  // get the speed in terms of pulses per sec
-      prevCLCtrlTime[i] = currMillis;
-      prevCounter[i] = getCounter[i];
+  canSendSDO(TX_ID_1, 1, 0x2001, 0x00, 0x01); // Enable only the left motor
+  //delay(10);
 
-      // Compute motor velocity in terms of rpm
-      velCalc[i] = velRaw[i] / motorConstant * 60.0; // (raw vel in pulses / s) / ([constant] 1 output shaft / 20 pulses) * 60 seconds
+  canSendSDO(TX_ID_1, 2, 0x200F, 0x00, 0x00); // set the driver to asynchronous movement
+  //delay(10);
 
-      // Begin PID control
-      velError[i] = mappedTarget[i] - velCalc[i]; // find the error
+  canSendSDO(TX_ID_1, 1, 0x6060, 0x00, 0x03); // select Speed mode operation 
+  //delay(10);
 
-      proportional[i] = Kp[i] * velError[i];
-      integral[i] += Ki[i] * (velError[i] * clCtrlTimeElapsed[i]);
-      derivative[i] = Kd[i] * ((velError[i] - velLastError[i]) / clCtrlTimeElapsed[i]);
+  canSendSDO(TX_ID_1, 4, 0x6083, 0x01, 0x64); // Acceleration time (100 ms) for left wheel
+  //delay(10);
 
-      // Get the output and remap it to RPM
-      output[i] = proportional[i] + integral[i] + derivative[i];
-      mappedOutput[i] = map(output[i], 0, motorMaxRPM, motorMinPWM, 255);
+  canSendSDO(TX_ID_1, 4, 0x6083, 0x02, 0x64); // Acceleration time (100 ms) for right wheel
+  //delay(10);
 
-      // If the input is already zero but the output still has some noise or oscillations
-      // force it to zero
-      if (target[i] == motorMinPWM && mappedOutput[i] != motorMinPWM){
-        integral[i] = 0;
-        proportional[i] = 0;
-        derivative[i] = 0;
-        mappedOutput[i] = 0;
-      }
+  canSendSDO(TX_ID_1, 4, 0x6084, 0x01, 100); // Deceleration time (100 ms) for left wheel
+  //delay(10);
 
-      // Output the calculated speed values to each motor
-      // Direction output
-      if (!direction[i]) {
-        digitalWrite(DIR[i], HIGH);
-      }
-      else {
-        digitalWrite(DIR[i], LOW);
-      }
+  canSendSDO(TX_ID_1, 4, 0x6084, 0x02, 100); // Deceleration time (100 ms) for right wheel
+  //delay(10);
 
-      // Speed output
-      ledcWrite(i, mappedOutput[i]);
+  // enable the driver
+  canSendSDO(TX_ID_1, 2, 0x6040, 0x00, 0x06);
+  //delay(10);
 
-      // Overwrite the previous error and current error
-      velLastError[i] = velError[i];
+  canSendSDO(TX_ID_1, 2, 0x6040, 0x00, 0x07);
+  //delay(10);
 
-      // Restart the noon-blocking delay for PID control
-      prevPIDMillis[i] = currMillis;
+  canSendSDO(TX_ID_1, 2, 0x6040, 0x00, 0x0F);
+  //delay(10);
 
 
-      base.deviceID = BASE_TELEM;
-      base.targetRPM[i] = mappedTarget[i];
-      base.measuredRPM[i] = velCalc[i];
-    }
-  }
-
-  if (allMotorsDone){
-    esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&base, sizeof(base));
-    allMotorsDone = false;
-  }
-
+  Serial.println("Status of motor driver: ");
+  canSendSDO(TX_ID_1, -1, 0x6041, 0x00, 0x00); // Request motor state
+  canReceiveSDO();
 }
 
 
@@ -377,14 +409,15 @@ void setup() {
   // ==============
   //    CAN Bus 
   // ==============
-  CAN.setPins(RX, TX);  // Set the CAN pins to communicate with the CAN Tranceiver
-
-  // start the CAN bus at 125 kbps
-  if (!CAN.begin(125E3)) {
-    Serial.println("Starting CAN failed!");
-    while (1)
-      ;  // forever loop if fails, you need to reset the microcontroller
+  // or override everything in one command;
+  // It is also safe to use .begin() without .end() as it calls it internally
+  if(ESP32Can.begin(ESP32Can.convertSpeed(500), TX, RX, 10, 10)) {
+      Serial.println("CAN bus started!");
+  } else {
+      Serial.println("CAN bus failed!");
   }
+
+  driverStartup();
 
   // ==============
   //    ESP-NOW 
@@ -423,26 +456,6 @@ void setup() {
     esp_now_register_recv_cb(OnDataRecv);    
   }
 
-  // ==========
-  //    GPIO
-  // ==========
-  // setup encoders and motors code
-  for (int i = 0; i < noOfMotors; i++) {
-    pinMode(ENCA[i], INPUT_PULLUP);
-    pinMode(ENCB[i], INPUT_PULLUP);
-    pinMode(PWM[i], OUTPUT);
-    pinMode(DIR[i], OUTPUT);
-
-    ledcSetup(i, 5000, 8);
-    ledcAttachPin(PWM[i], i);
-  }
-
-  // Attach interrupts to motor encoder pins
-  attachInterrupt(ENCA[0], readEncoderFLW, RISING);
-  attachInterrupt(ENCA[1], readEncoderFRW, RISING);
-  attachInterrupt(ENCA[2], readEncoderBLW, RISING);
-  attachInterrupt(ENCA[3], readEncoderBRW, RISING);
-
 }
 
 
@@ -460,16 +473,7 @@ void loop() {
   // If we got command velocities, operate the motors
   if (gotCmdVelData){
     prevDCTimeoutMillis = currMillis;
-
-    // If the CAN data is meant for open loop control
-    if (canID == 1) {
-      openLoopMotorCtrl();
-    }
-
-    // If the CAN data is meant for closed loop control
-    else if (canID == 2){
-      closedLoopMotorCtrl();
-    }
+    sendCmdVel();
   }
 
   // Safety feature where if there is no CAN data received, turn off the motors
@@ -477,7 +481,8 @@ void loop() {
     if(currMillis - prevDCTimeoutMillis >= DC_TIMEFRAME){
       Serial.println("No CAN data received. Stopping motors!");
       for (int i = 0; i < noOfMotors; i++){
-        ledcWrite(i, motorMinPWM);
+        canSendSDO(TX_ID_1, 4, 0x60FF, 0x01, 0x00);
+        canSendSDO(TX_ID_1, 4, 0x60FF, 0x02, 0x00);
       }
     }
   }

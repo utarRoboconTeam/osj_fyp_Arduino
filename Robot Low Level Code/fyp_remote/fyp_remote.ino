@@ -86,9 +86,10 @@ bool pidTune = false;  // true to enable live PID tuning, false to disable it
 
 // ESP-NOW
 enum deviceID { BASE_TELEOP, BASE_TELEM };
-uint8_t chan = 2;   // To prevent interference-induced lagging, might want to switch to another channel (0 to 11);
+uint8_t chan = 5;   // To prevent interference-induced lagging, might want to switch to another channel (0 to 11);
 uint8_t broadcastAddress1[] = { 0xA0, 0xA3, 0xB3, 0x8A, 0x7D, 0x88 };  // Main Controller
 uint8_t broadcastAddress2[] = { 0xA0, 0xA3, 0xB3, 0x8A, 0x67, 0xD8 };  // Base Controller
+uint8_t broadcastAddress3[] = { 0xD8, 0xBC, 0x38, 0xFC, 0x2D, 0xF8 };  // Telemetry Viewer
 
 // Addressable LED parameters
 unsigned int red = 0, green = 0, blue = 0;  // onboard LED RGB values
@@ -733,6 +734,13 @@ void setup() {
     return;
   }
 
+  //Add peer
+  memcpy(peerInfo.peer_addr, broadcastAddress3, 6);
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add peer");
+    return;
+  }
+
   // ==========
   //    GPIO
   // ==========
@@ -938,7 +946,7 @@ void loop() {
     if (currMillis - prevESPNOWMillis >= ESPNOW_TIMEFRAME){
       esp_err_t toMain = esp_now_send(broadcastAddress1, (uint8_t *)&tele, sizeof(tele));
       esp_err_t toBase = esp_now_send(broadcastAddress2, (uint8_t *)&tele, sizeof(tele));
-
+      esp_err_t toTelem = esp_now_send(broadcastAddress3, (uint8_t *)&tele, sizeof(tele));
       prevESPNOWMillis = currMillis;
     }
 
@@ -980,6 +988,7 @@ void loop() {
     // send the data
     if (currMillis - prevESPNOWMillis >= ESPNOW_TIMEFRAME){
       esp_err_t toMain = esp_now_send(broadcastAddress1, (uint8_t *)&tele, sizeof(tele));
+      esp_err_t toTelem = esp_now_send(broadcastAddress3, (uint8_t *)&tele, sizeof(tele));
       prevESPNOWMillis = currMillis;
     }
 
