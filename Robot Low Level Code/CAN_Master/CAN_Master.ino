@@ -22,6 +22,9 @@
 #include <FastLED.h>
 #include <TinyGPSPlus.h>
 #include <SoftwareSerial.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
 
 // ||==============================||
 // ||          DEFINITIONS         ||
@@ -48,6 +51,7 @@
 #define RESET_TIMEFRAME 1000
 #define DC_TIMEFRAME 1000
 #define SERIAL_TIMEFRAME 100
+#define IMU_TIMEFRAME 100
 #define LED_TIMEFRAME 100
 #define CAN_TIMEFRAME 50 // 50 ms
 #define LED_BLINK_DELAY_SLOW 100  // 100 ms
@@ -128,6 +132,10 @@ float x = 0;
 float y = 0;
 float w = 0;
 
+// IMU data
+float roll = 0.0;
+float pitch = 0.0;
+float yaw = 0.0;
 
 // gps coordinates
 float gpsLat = 8888.0;
@@ -144,6 +152,7 @@ unsigned long previousResetMillis = 0;
 unsigned long dcTimeoutMillis = 0;
 unsigned long prevContinueMillis = 0;
 unsigned long prevSerialMillis = 0;
+unsigned long prevIMUMillis = 0;
 unsigned long prevLEDStatusMillis = 0;
 unsigned long prevCANMillis = 0;
 
@@ -188,6 +197,7 @@ TinyGPSPlus gps;  // The TinyGPSPlus object
 SoftwareSerial gpsSerial(RXPin, TXPin);  // The serial connection to the GPS device
 CanFrame txFrame = { 0 };
 CanFrame rxFrame;
+Adafruit_BNO055 bno = Adafruit_BNO055(55);
 
 // ||==============================||
 // ||           FUNCTIONS          ||
@@ -269,6 +279,12 @@ void sendDataToPC() {
   Serial.print(gpsLat);
   Serial.print("/");
   Serial.print(gpsLong);
+  Serial.print(":");
+  Serial.print(roll);
+  Serial.print("/");
+  Serial.print(pitch);
+  Serial.print("/");
+  Serial.print(yaw);
   Serial.print(":");
   Serial.print(measuredRPM[0]);
   Serial.print("/");
@@ -414,6 +430,15 @@ void ledStatus (unsigned int status){
   }
 }
 
+void getIMUData(){
+  sensors_event_t event; 
+  bno.getEvent(&event);
+
+  roll = event.orientation.z;
+  pitch = event.orientation.y;
+  yaw = event.orientation.x;
+
+}
 
 // execute the serial input command along with the specified argument values
 void runAuto() {
@@ -502,6 +527,20 @@ void setup() {
   } else {
       Serial.println("CAN bus failed!");
   }
+
+  // ================
+  //    IMU SENSOR
+  // ================
+
+  /* Initialise the sensor */
+  if(!bno.begin())
+  {
+    /* There was a problem detecting the BNO055 ... check your connections */
+    Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+    while(1);
+  }
+    
+  bno.setExtCrystalUse(true);
 
 
   // ==============
@@ -723,6 +762,12 @@ void loop() {
   if (currMillis - prevSerialMillis >= SERIAL_TIMEFRAME){
     sendDataToPC();    
     prevSerialMillis = currMillis;
+  }
+
+    // Send odometry and other data to PC via serial
+  if (currMillis - prevIMUMillis >= IMU_TIMEFRAME){
+    getIMUData();    
+    prevIMUMillis = currMillis;
   }
 
   // Change the led colour of the robot depending on the modes
