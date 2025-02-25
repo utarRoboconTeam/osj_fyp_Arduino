@@ -284,7 +284,7 @@ void sendDataToPC() {
   Serial.print("/");
   Serial.print(pitch);
   Serial.print("/");
-  Serial.println(yaw);
+  Serial.print(yaw);
   Serial.print(":");
   Serial.print(measuredRPM[0]);
   Serial.print("/");
