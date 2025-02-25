@@ -35,7 +35,7 @@ enum whichTest {
   E_BRAKE
 };
 
-int selectedTest = PWM_TEST;
+int selectedTest = DIR_CHANGE_SMOOTH;
 
 uint8_t PWM[noOfMotors] = { 0, 0 };
 uint8_t DIR[noOfMotors] = { 0, 0 };
@@ -176,32 +176,45 @@ void canSendSDO(int byteLength, uint16_t index, uint8_t subIndex, int32_t value)
 
 void canReceiveSDO(){
   // You can set custom timeout, default is 1000
+  static int32_t left_velocity = 0;
+  static int32_t right_velocity = 0;
   if(ESP32Can.readFrame(rxFrame, 1000)) {
+    if (rxFrame.data[3] == 1){
+      left_velocity = (rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4]);
+    }
+    else if (rxFrame.data[3] == 2){
+      right_velocity = (rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4]);
+    }
       // Comment out if too many frames
-      Serial.printf("Received frame: %03X  \r\n", rxFrame.identifier);
-      Serial.print(rxFrame.data[0], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[1], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[2], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[3], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[4], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[5], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[6], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[7], HEX);
-      Serial.print(" ");
+      // Serial.printf("Received frame: %03X  \r\n", rxFrame.identifier);
+      // Serial.print(rxFrame.data[0], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[1], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[2], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[3], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[4], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[5], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[6], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[7], HEX);
+      // Serial.print(" ");
+      Serial.print("Left Wheel Speed: ");
+      Serial.print(left_velocity * 0.1);
+      Serial.print(" Right Wheel Speed: ");
+      Serial.println(right_velocity * 0.1);
   }
 }
 
 
 void pwmOnlyTest(){
   Serial.println("Start moving");
-  canSendSDO(4, 0x60FF, 0x00, 0x64);
+  canSendSDO(4, 0x60FF, 0x01, 0x64);
+  canSendSDO(4, 0x60FF, 0x02, 0x64);
   Serial.println("moving");
   delay(1000);
   // Serial.println("Start stopping");
@@ -211,17 +224,31 @@ void pwmOnlyTest(){
 }
 
 void dirOnlyTest(){
-  canSendSDO(4, 0x60FF, 0x00, -100);
+  canSendSDO(4, 0x60FF, 0x01, 100);
+  canSendSDO(4, 0x60FF, 0x02, 100);
+  delay(1000);
+  canSendSDO(4, 0x60FF, 0x01, -100);
+  canSendSDO(4, 0x60FF, 0x02, 100);
+  delay(1000);
+  canSendSDO(4, 0x60FF, 0x01, -100);
+  canSendSDO(4, 0x60FF, 0x02, -100);
+  delay(1000);
+  canSendSDO(4, 0x60FF, 0x01, 100);
+  canSendSDO(4, 0x60FF, 0x02, -100);
+  delay(1000);
+
 }
 
 void pwmSweepTest(){
   for (int i = 0; i < 100; i++){
-    canSendSDO(4, 0x60FF, 0x00, i);
-    delay(10);
+    canSendSDO(4, 0x60FF, 0x01, i);
+    Serial.println(i);
+    delay(100);
   }
   for (int i = 100; i > 0; i--){
-    canSendSDO(4, 0x60FF, 0x00, i);
-    delay(10);
+    canSendSDO(4, 0x60FF, 0x01, i);
+    Serial.println(i);
+    delay(100);
   }
 }
 
@@ -233,28 +260,61 @@ void sharpDirectionChangeTest(){
 }
 
 void smoothDirectionChangeTest(){
-  for (int i = 0; i < 100; i++){
-    canSendSDO(4, 0x60FF, 0x00, i);
+  for (int i = 0; i < 1000; i++){
+    canSendSDO(4, 0x60FF, 0x01, i);
+    canSendSDO(4, 0x60FF, 0x02, i);
     delay(10);
+    canSendSDO(-1, 0x606C, 0x01, 0x00);
+    canReceiveSDO();
+    delay(10);
+    canSendSDO(-1, 0x606C, 0x02, 0x00);
+    canReceiveSDO();
+    delay(10);
+    delay(70);
   }
-  for (int i = 100; i > 0; i--){
-    canSendSDO(4, 0x60FF, 0x00, i);
+  for (int i = 1000; i > 0; i--){
+    canSendSDO(4, 0x60FF, 0x01, i);
+    canSendSDO(4, 0x60FF, 0x02, i);
     delay(10);
+    canSendSDO(-1, 0x606C, 0x01, 0x00);
+    canReceiveSDO();
+    delay(10);
+    canSendSDO(-1, 0x606C, 0x02, 0x00);
+    canReceiveSDO();
+    delay(10);
+    delay(70);
   }
-  for (int i = 0; i > -100; i++){
-    canSendSDO(4, 0x60FF, 0x00, i);
+  for (int i = 0; i > -1000; i--){
+    canSendSDO(4, 0x60FF, 0x01, i);
+    canSendSDO(4, 0x60FF, 0x02, i);
     delay(10);
+    canSendSDO(-1, 0x606C, 0x01, 0x00);
+    canReceiveSDO();
+    delay(10);
+    canSendSDO(-1, 0x606C, 0x02, 0x00);
+    canReceiveSDO();
+    delay(10);
+    delay(70);
   }
-  for (int i = -100; i < 0; i--){
-    canSendSDO(4, 0x60FF, 0x00, i);
+  for (int i = -1000; i < 0; i++){
+    canSendSDO(4, 0x60FF, 0x01, i);
+    canSendSDO(4, 0x60FF, 0x02, i);
     delay(10);
+    canSendSDO(-1, 0x606C, 0x01, 0x00);
+    canReceiveSDO();
+    delay(10);
+    canSendSDO(-1, 0x606C, 0x02, 0x00);
+    canReceiveSDO();
+    delay(10);
+    delay(70);
   }
 }
 
 void emergencyBrakeTest(){
-  canSendSDO(4, 0x60FF, 0x00, 100);
+  canSendSDO(4, 0x60FF, 0x01, 100);
   delay(1000);
-  canSendSDO(2, 0x605A, 0x00, 0x07); // emergency brake
+  canSendSDO(2, 0x2030, 0x02, 0x09); // emergency brake
+  canReceiveSDO();
   delay(1000);
 }
 
@@ -264,9 +324,9 @@ void driverStartup(){
   // canSendCtrlWord(0x0007); // Enable the driver and the motors
   // canSendCtrlWord(0x000F); // Set the operation mode to speed control mode
   
-  canSendSDO(1, 0x2001, 0x00, 0x01); // Enable only the left motor
-  canReceiveSDO();
-  delay(10);
+  // canSendSDO(1, 0x2001, 0x00, 0x01); // Enable only the left motor
+  // canReceiveSDO();
+  // delay(10);
 
 
   // clear any potential faults
@@ -315,6 +375,11 @@ void driverStartup(){
   canSendSDO(4, 0x6084, 0x02, 100); // Deceleration time (100 ms) for right wheel
   canReceiveSDO();
   delay(10);
+
+  canSendSDO(2, 0x605A, 0x00, 0x06); // emergency brake
+  canReceiveSDO();
+  delay(10);
+
 
   Serial.println("First status of motor driver: ");
   canSendSDO(-1, 0x6041, 0x00, 0x00); // Request motor state
@@ -427,7 +492,7 @@ void loop() {
       break;
   }
 
-  canReceiveSDO();
-  Serial.println("a cycle done!");
+  //canReceiveSDO();
+  //Serial.println("a cycle done!");
   
 }
