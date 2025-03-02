@@ -24,6 +24,13 @@
 #define RX 23  // Connect to RX Pin of the CAN module
 #define TX 32  // connect to TX Pin of the CAN module
 
+
+#define flLEDPin 12  // for status
+#define frLEDPin 2  // for status
+#define blLEDPin 13  // for status
+#define brLEDPin 15  // for status
+
+
 #define TX_ID_1 0x601
 #define TX_ID_2 0x602
 #define RX_ID_1 0x581
@@ -32,7 +39,8 @@
 
 // Time constants
 #define DC_TIMEFRAME 1000  // 1000 ms
-#define PID_TIMEFRAME 50000 // 50 ms
+#define CAN_TIMEFRAME 5 // 5 ms
+#define ESPNOW_TIMEFRAME 50
 
 // DC Motor constants
 #define motorMaxRPM 300  // RPM
@@ -51,7 +59,7 @@ bool pidTune = false; // Live PID tuning
 // ESP-NOW
 enum deviceID { BASE_TELEOP, BASE_TELEM }; // Enumeration (to differentiate between which controller board sends out what data)
 uint8_t chan = 5; // To prevent interference-induced lagging, might want to switch to another channel (0 to 11);
-uint8_t broadcastAddress[] = { 0xF4, 0x12, 0xFA, 0xE7, 0xA0, 0x8C };  // Remote controller MAC Address
+uint8_t broadcastAddress[] = { 0x48, 0xCA, 0x43, 0x9B, 0x5E, 0x98 };  // Remote controller MAC Address
 
 
 // CAN bus
@@ -65,21 +73,9 @@ uint8_t canID = 0;
 int target[noOfMotors] = { 0, 0, 0, 0 };          // target speed of the motor in PWM
 float mappedTarget[noOfMotors] = { 0, 0, 0, 0 };  // target speed mapped from PWM to RPM
 int direction[noOfMotors] = { 0, 0, 0, 0 };       // target direction of the motor
-float output[noOfMotors] = { 0, 0, 0, 0 };        // output speed of the motor in RPM
-float mappedOutput[noOfMotors] = { 0, 0, 0, 0 };  // output speed mapped from RPM to PWM
 
 // Velocity calculations
-float velRaw[noOfMotors] = { 0, 0, 0, 0 };
-float velGet[noOfMotors] = { 0, 0, 0, 0 };
-float velCalc[noOfMotors] = { 0, 0, 0, 0 };
-float velError[noOfMotors] = { 0, 0, 0, 0 };
-float velLastError[noOfMotors] = { 0, 0, 0, 0 };
-
-// PID calculations
-float proportional[noOfMotors] = { 0, 0, 0, 0 };  
-float integral[noOfMotors] = { 0, 0, 0, 0 };
-float derivative[noOfMotors] = { 0, 0, 0, 0 };
-float clCtrlTimeElapsed[noOfMotors] = { 0, 0, 0, 0 };  
+float velocity[noOfMotors] = { 0, 0, 0, 0 };
 
 // PID constants (CHANGE THESE TO MATCH YOUR ROBOT'S BASE PERFORMANCE)
 // |
@@ -90,17 +86,18 @@ float Ki[noOfMotors] = { 0.0, 0.0, 0.0, 0.0 };
 float Kd[noOfMotors] = { 0.002, 0.002, 0.002, 0.002 };
 
 // Flags to determine whether operations are done or not
-bool allMotorsDone = false; // check for whether all motor velocities have been calculated
 bool gotCmdVelData = false; // check for presence of cmd vel data
 
 // For non-blocking delays
 unsigned long prevDCTimeoutMillis = 0;
-unsigned long currMillis[noOfMotors] = { 0, 0, 0, 0 };
-unsigned long prevPIDMillis[noOfMotors] = { 0, 0, 0, 0 };
-unsigned long prevCLCtrlTime[noOfMotors] = { 0, 0, 0, 0 };
+unsigned long prevCANMillis = 0;
+unsigned long prevESPNOWMillis = 0;
 
 
-// ESP-NOW structure to send data
+// ------------------
+// OBJECTS
+// ------------------
+// Structure example to send data
 // Must match the receiver structure
 typedef struct ESP32TELE {
   
@@ -113,12 +110,7 @@ typedef struct ESP32TELE {
 
   // base
   float xPos, yPos, wPos;
-  bool autoOrManual, clearOdom;
-
-  // arm
-  float xArm, yArm, zArm;
-  unsigned short int rollArm, pitchArm, gripArm;
-  bool homeAllAxes;
+  bool autoOrManual, resetOdom, waitKey;
 
   // ==============
   //   TELEMETRY
@@ -127,10 +119,6 @@ typedef struct ESP32TELE {
   // base
   float targetRPM[noOfMotors];
   float measuredRPM[noOfMotors];
-
-  // arm
-  long int xArmNow, yArmNow, zArmNow;
-  unsigned short int rollArmNow, pitchArmNow, gripArmNow, forceReading;
 
   // ===================
   //   LIVE PID TUNING
@@ -282,27 +270,66 @@ void canSendSDO(uint16_t nodeID, int byteLength, uint16_t index, uint8_t subInde
 
 }
 
-void canReceiveSDO(){
+void canReceiveSDO(bool readWheelSpeed){
   // You can set custom timeout, default is 1000
-  if(ESP32Can.readFrame(rxFrame, 1000)) {
-      // Comment out if too many frames
-      Serial.printf("Received frame: %03X  \r\n", rxFrame.identifier);
-      Serial.print(rxFrame.data[0], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[1], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[2], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[3], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[4], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[5], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[6], HEX);
-      Serial.print(" ");
-      Serial.print(rxFrame.data[7], HEX);
-      Serial.print(" ");
+  if(ESP32Can.readFrame(rxFrame, 0)) {
+
+      // If we just want to read wheel speeds
+      if (readWheelSpeed){
+        int16_t checkDataType = (rxFrame.data[2] << 8) | (rxFrame.data[1]);
+        // if the wheel speed data is coming from node 1
+        if (rxFrame.identifier == RX_ID_1){
+          // ensure that you are actually getting wheel speed data
+          if (checkDataType == 0x606C){
+            // FLW speed
+            if (rxFrame.data[3] == 1){
+              velocity[0] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+            }
+            // FRW speed
+            else if (rxFrame.data[3] == 2){
+              velocity[1] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+            }
+          }          
+        }
+
+        // if the wheel speed data is coming from node 2
+        else if (rxFrame.identifier == RX_ID_2){
+          // ensure that you are actually getting wheel speed data
+          if (checkDataType == 0x606C){
+            // BLW speed
+            if (rxFrame.data[3] == 1){
+              velocity[2] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+            }
+            // BRW speed
+            else if (rxFrame.data[3] == 2){
+              velocity[3] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+            }
+          }
+        }
+      }
+
+      // If we are only checking what data are we receiving from the nodes
+      else{
+        // Comment out if too many frames
+        Serial.printf("Received frame: %03X  \r\n", rxFrame.identifier);
+        Serial.print(rxFrame.data[0], HEX);
+        Serial.print(" ");
+        Serial.print(rxFrame.data[1], HEX);
+        Serial.print(" ");
+        Serial.print(rxFrame.data[2], HEX);
+        Serial.print(" ");
+        Serial.print(rxFrame.data[3], HEX);
+        Serial.print(" ");
+        Serial.print(rxFrame.data[4], HEX);
+        Serial.print(" ");
+        Serial.print(rxFrame.data[5], HEX);
+        Serial.print(" ");
+        Serial.print(rxFrame.data[6], HEX);
+        Serial.print(" ");
+        Serial.print(rxFrame.data[7], HEX);
+        Serial.print(" ");        
+      }
+
   }
 }
 
@@ -332,64 +359,120 @@ void readCmdVel(){
 }
 
 void sendCmdVel(){
-  Serial.print(target[0] * direction[0]);
-  Serial.print(" ");
-  Serial.println(target[1] * direction[1]);
-  canSendSDO(TX_ID_1, 4, 0x60FF, 0x01, target[0] * direction[0]);
-  canSendSDO(TX_ID_1, 4, 0x60FF, 0x02, target[1] * direction[1]);
-  //canSendSDO(TX_ID_2, 4, 0x60FF, 0x01, target[2] * direction[2]);
-  //canSendSDO(TX_ID_2, 4, 0x60FF, 0x02, target[3] * direction[3]);
+  unsigned long currMillis = millis();
+  static short int wheelSequence = 0;
+
+  if (currMillis - prevCANMillis >= CAN_TIMEFRAME){
+    switch (wheelSequence){
+      case 0:
+        canSendSDO(TX_ID_1, 4, 0x60FF, 0x01, target[0] * direction[0]);
+        wheelSequence = 1;
+        break;
+      case 1:
+        canSendSDO(TX_ID_1, 4, 0x60FF, 0x02, target[1] * direction[1]);
+        wheelSequence = 2;
+        break;
+      case 2:
+        canSendSDO(TX_ID_2, 4, 0x60FF, 0x01, target[2] * direction[2]);
+        wheelSequence = 3;
+        break;
+      case 3:
+        canSendSDO(TX_ID_2, 4, 0x60FF, 0x02, target[3] * direction[3]);
+        wheelSequence = 0;
+        break;
+      default:
+        break;
+    }
+    prevCANMillis = currMillis;
+  }
 }
 
 
 void readWheelSpeeds(){
-  canSendSDO(TX_ID_1, -1, 0x60FF, 0x01, 0x00);
-  canReceiveSDO();
-  canSendSDO(TX_ID_1, -1, 0x60FF, 0x02, 0x00);
-  canReceiveSDO();
-  canSendSDO(TX_ID_2, -1, 0x60FF, 0x01, 0x00);
-  canReceiveSDO();
-  canSendSDO(TX_ID_2, -1, 0x60FF, 0x02, 0x00);
-  canReceiveSDO();
+  unsigned long currMillis = millis();
+
+  canSendSDO(TX_ID_1, -1, 0x606C, 0x01, 0x00);
+  canReceiveSDO(true);
+  canSendSDO(TX_ID_1, -1, 0x606C, 0x02, 0x00);
+  canReceiveSDO(true);
+  canSendSDO(TX_ID_2, -1, 0x606C, 0x01, 0x00);
+  canReceiveSDO(true);
+  canSendSDO(TX_ID_2, -1, 0x606C, 0x02, 0x00);
+  canReceiveSDO(true);
+
+  analogWrite(flLEDPin, (int)(abs(velocity[0])));
+  analogWrite(frLEDPin, (int)(abs(velocity[1])));
+  analogWrite(blLEDPin, (int)(abs(velocity[2])));
+  analogWrite(brLEDPin, (int)(abs(velocity[3])));
+
+  base.deviceID = BASE_TELEM;
+  base.measuredRPM[0] = velocity[0];
+  base.measuredRPM[1] = velocity[1];
+  base.measuredRPM[2] = velocity[2];
+  base.measuredRPM[3] = velocity[3];
+
+  if (currMillis - prevESPNOWMillis >= ESPNOW_TIMEFRAME){
+    esp_err_t toRemote = esp_now_send(broadcastAddress, (uint8_t *)&base, sizeof(base));
+    prevESPNOWMillis = currMillis;
+  }
+
+
 }
 
 void driverStartup(){
 
-  canSendSDO(TX_ID_1, 1, 0x2001, 0x00, 0x01); // Enable only the left motor
-  //delay(10);
-
   canSendSDO(TX_ID_1, 2, 0x200F, 0x00, 0x00); // set the driver to asynchronous movement
-  //delay(10);
+  delay(10);
+  canSendSDO(TX_ID_2, 2, 0x200F, 0x00, 0x00); // set the driver to asynchronous movement
+  delay(10);
 
-  canSendSDO(TX_ID_1, 1, 0x6060, 0x00, 0x03); // select Speed mode operation 
-  //delay(10);
+  canSendSDO(TX_ID_1, 1, 0x6060, 0x00, 0x03); // select Speed mode operation
+  delay(10);
+  canSendSDO(TX_ID_2, 1, 0x6060, 0x00, 0x03); // select Speed mode operation 
+  delay(10);
 
   canSendSDO(TX_ID_1, 4, 0x6083, 0x01, 0x64); // Acceleration time (100 ms) for left wheel
-  //delay(10);
+  delay(10);
+  canSendSDO(TX_ID_2, 4, 0x6083, 0x01, 0x64); // Acceleration time (100 ms) for left wheel
+  delay(10);
 
   canSendSDO(TX_ID_1, 4, 0x6083, 0x02, 0x64); // Acceleration time (100 ms) for right wheel
-  //delay(10);
+  delay(10);
+  canSendSDO(TX_ID_2, 4, 0x6083, 0x02, 0x64); // Acceleration time (100 ms) for right wheel
+  delay(10);
 
   canSendSDO(TX_ID_1, 4, 0x6084, 0x01, 100); // Deceleration time (100 ms) for left wheel
-  //delay(10);
+  delay(10);
+  canSendSDO(TX_ID_2, 4, 0x6084, 0x01, 100); // Deceleration time (100 ms) for left wheel
+  delay(10);
 
   canSendSDO(TX_ID_1, 4, 0x6084, 0x02, 100); // Deceleration time (100 ms) for right wheel
-  //delay(10);
+  delay(10);
+  canSendSDO(TX_ID_2, 4, 0x6084, 0x02, 100); // Deceleration time (100 ms) for right wheel
+  delay(10);
 
   // enable the driver
   canSendSDO(TX_ID_1, 2, 0x6040, 0x00, 0x06);
-  //delay(10);
+  delay(10);
+  canSendSDO(TX_ID_2, 2, 0x6040, 0x00, 0x06);
+  delay(10);
 
   canSendSDO(TX_ID_1, 2, 0x6040, 0x00, 0x07);
-  //delay(10);
+  delay(10);
+  canSendSDO(TX_ID_2, 2, 0x6040, 0x00, 0x07);
+  delay(10);
 
   canSendSDO(TX_ID_1, 2, 0x6040, 0x00, 0x0F);
-  //delay(10);
+  delay(10);
+  canSendSDO(TX_ID_2, 2, 0x6040, 0x00, 0x0F);
+  delay(10);
 
 
-  Serial.println("Status of motor driver: ");
-  canSendSDO(TX_ID_1, -1, 0x6041, 0x00, 0x00); // Request motor state
-  canReceiveSDO();
+  // Serial.println("Status of motor driver: ");
+  // canSendSDO(TX_ID_1, -1, 0x6041, 0x00, 0x00); // Request motor state
+  // canSendSDO(TX_ID_2, -1, 0x6041, 0x00, 0x00); // Request motor state
+  // canReceiveSDO();
+
 }
 
 
@@ -400,11 +483,25 @@ void driverStartup(){
 // |=====================================|
 
 void setup() {
+
+  // ==========
+  //    GPIO 
+  // ==========
+
+  pinMode(flLEDPin, OUTPUT);
+  pinMode(frLEDPin, OUTPUT);
+  pinMode(blLEDPin, OUTPUT);
+  pinMode(brLEDPin, OUTPUT);
+
+  digitalWrite(flLEDPin, LOW);
+  digitalWrite(frLEDPin, LOW);
+  digitalWrite(blLEDPin, LOW);
+  digitalWrite(brLEDPin, LOW);
+
   // ============================
   //     SERIAL COMMUNICATION
   // ============================
   Serial.begin(115200);  // Begin the serial communication at 115200 baud rate
-
 
   // ==============
   //    CAN Bus 
@@ -456,6 +553,20 @@ void setup() {
     esp_now_register_recv_cb(OnDataRecv);    
   }
 
+  // indicate start of operation
+  digitalWrite(flLEDPin, HIGH);
+  delay(100);
+  digitalWrite(flLEDPin, LOW);
+  digitalWrite(frLEDPin, HIGH);
+  delay(100);
+  digitalWrite(frLEDPin, LOW);
+  digitalWrite(blLEDPin, HIGH);
+  delay(100);
+  digitalWrite(blLEDPin, LOW);
+  digitalWrite(brLEDPin, HIGH);
+  delay(100);
+  digitalWrite(blLEDPin, LOW);
+
 }
 
 
@@ -466,14 +577,15 @@ void setup() {
 // |=====================================|
 void loop() {
   unsigned long currMillis = millis();
-
-  // Get the command velocities from CAN bus
+  
   readCmdVel();
 
   // If we got command velocities, operate the motors
   if (gotCmdVelData){
     prevDCTimeoutMillis = currMillis;
+  // Get the command velocities from CAN bus
     sendCmdVel();
+    readWheelSpeeds();
   }
 
   // Safety feature where if there is no CAN data received, turn off the motors
@@ -483,6 +595,8 @@ void loop() {
       for (int i = 0; i < noOfMotors; i++){
         canSendSDO(TX_ID_1, 4, 0x60FF, 0x01, 0x00);
         canSendSDO(TX_ID_1, 4, 0x60FF, 0x02, 0x00);
+        canSendSDO(TX_ID_2, 4, 0x60FF, 0x01, 0x00);
+        canSendSDO(TX_ID_2, 4, 0x60FF, 0x02, 0x00);
       }
     }
   }

@@ -258,9 +258,11 @@ void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
     targetRPM[0] = tele.targetRPM[0];
     targetRPM[1] = tele.targetRPM[1];
     targetRPM[2] = tele.targetRPM[2];
+    targetRPM[3] = tele.targetRPM[3];
     measuredRPM[0] = tele.measuredRPM[0];
     measuredRPM[1] = tele.measuredRPM[1];
     measuredRPM[2] = tele.measuredRPM[2];
+    measuredRPM[3] = tele.measuredRPM[3];
   }
 }
 
@@ -991,7 +993,7 @@ void loop() {
     // send the data
     if (currMillis - prevESPNOWMillis >= ESPNOW_TIMEFRAME){
       esp_err_t toMain = esp_now_send(broadcastAddress1, (uint8_t *)&tele, sizeof(tele));
-      esp_err_t toTelem = esp_now_send(broadcastAddress3, (uint8_t *)&tele, sizeof(tele));
+      //esp_err_t toTelem = esp_now_send(broadcastAddress3, (uint8_t *)&tele, sizeof(tele));
       prevESPNOWMillis = currMillis;
     }
 
@@ -1004,53 +1006,53 @@ void loop() {
   RGBLEDStatus(red, green, blue);
 
   // Uncomment this to check which buttons correspond to which variables
-  Serial.print(xBuf);
-  Serial.print(" ");
-  Serial.print(yBuf);
-  Serial.print(" ");
-  Serial.print(zBuf);
-  Serial.print(" ");
-  Serial.print(dBuf);
-  Serial.print(" ");
-  Serial.print(POT1_Pos);
-  Serial.print(" ");
-  Serial.print(POT2_Pos);
-  Serial.print(" ");
-  Serial.print(POT3_Pos);
-  Serial.print(" ");
-  Serial.print(POT4_Pos);
-  Serial.print(" ");
-  Serial.print(digitalRead(B1));
-  Serial.print(" ");
-  Serial.print(digitalRead(B2));
-  Serial.print(" ");
-  Serial.print(digitalRead(B3));
-  Serial.print(" ");
-  Serial.print(digitalRead(B4));
-  Serial.print(" ");
-  Serial.print(digitalRead(B5));
-  Serial.print(" ");
-  Serial.print(digitalRead(B6));
-  Serial.print(" ");
-  Serial.print(digitalRead(B7));
-  Serial.print(" ");
-  Serial.print(digitalRead(B8));
-  Serial.print(" ");
-  Serial.print(digitalRead(L1));
-  Serial.print(" ");
-  Serial.print(digitalRead(R1));
-  Serial.print(" ");
-  Serial.print(digitalRead(LU));
-  Serial.print(" ");
-  Serial.print(digitalRead(LD));
-  Serial.print(" ");
-  Serial.print(digitalRead(RU));
-  Serial.print(" ");
-  Serial.print(digitalRead(RD));
-  Serial.print(" ");
-  Serial.print(digitalRead(SW1));
-  Serial.print(" ");
-  Serial.println(digitalRead(SW2));
+  // Serial.print(xBuf);
+  // Serial.print(" ");
+  // Serial.print(yBuf);
+  // Serial.print(" ");
+  // Serial.print(zBuf);
+  // Serial.print(" ");
+  // Serial.print(dBuf);
+  // Serial.print(" ");
+  // Serial.print(POT1_Pos);
+  // Serial.print(" ");
+  // Serial.print(POT2_Pos);
+  // Serial.print(" ");
+  // Serial.print(POT3_Pos);
+  // Serial.print(" ");
+  // Serial.print(POT4_Pos);
+  // Serial.print(" ");
+  // Serial.print(digitalRead(B1));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(B2));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(B3));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(B4));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(B5));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(B6));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(B7));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(B8));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(L1));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(R1));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(LU));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(LD));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(RU));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(RD));
+  // Serial.print(" ");
+  // Serial.print(digitalRead(SW1));
+  // Serial.print(" ");
+  // Serial.println(digitalRead(SW2));
 
 }
 

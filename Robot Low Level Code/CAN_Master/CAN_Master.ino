@@ -300,10 +300,10 @@ void skidSteeringKinematics(float yInput, float wInput, int* FLWOut, int* FRWOut
   // Mecanum wheel robot kinematics code
   // Take note that with the current wiring
   // the formula may be different from what you have seen online
-  *FLWOut = constrain((yInput - wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
-  *FRWOut = constrain((-yInput - wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
-  *BLWOut = constrain((yInput - wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
-  *BRWOut = constrain((-yInput - wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
+  *FLWOut = constrain((-yInput + wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
+  *FRWOut = constrain((yInput + wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
+  *BLWOut = constrain((yInput + wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
+  *BRWOut = constrain((-yInput + wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
 
   analogWrite(flLEDPin, abs(*FLWOut));
   analogWrite(frLEDPin, abs(*FRWOut));
