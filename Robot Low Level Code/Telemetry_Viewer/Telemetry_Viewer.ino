@@ -63,7 +63,7 @@
 // ||           VARIABLES          ||
 // ||==============================||
 // ESP-NOW
-enum deviceID { BASE_TELEOP, BASE_TELEM }; // Enumeration (to differentiate between which controller board sends out what data)
+enum deviceID { MAIN_TELEOP, BASE_TELEOP, MAIN_TELEM, BASE_TELEM }; // Enumeration (to differentiate between which controller board sends out what data)
 uint8_t chan = 5; // <======= NOTE! Check if the selected ESP-NOW channel is quiet or not
 
 
@@ -78,6 +78,15 @@ bool autoOrManual = true;  // default is auto mode
 bool resetOdom = false;
 bool wasSwitchedToManual = false;
 bool waitForKey = false;
+
+
+// Main controller telemetry data
+float internalTemp = 8888.0;
+float internalHumid = 8888.0;
+float gpsLat = 8888.0;
+float gpsLong = 8888.0;
+float batteryLevel = 0.0;
+int robotStatus = OFFLINE;
 
 float measuredRPM[noOfMotors] = { 0, 0, 0, 0 };
 
@@ -99,7 +108,9 @@ unsigned long prevContinueMillis = 0;
 unsigned long prevDisplayMillis = 0;
 unsigned long prevLEDStatusMillis = 0;
 
-
+// ------------------
+// OBJECTS
+// ------------------
 // Structure example to send data
 // Must match the receiver structure
 typedef struct ESP32TELE {
@@ -111,30 +122,28 @@ typedef struct ESP32TELE {
   //   TELEOPERATION
   // ==================
 
-  // base
+  // main
   float xPos, yPos, wPos;
-  bool autoOrManual, resetOdom, waitKey;
+  bool autoOrManual, resetOdom, restartDriver, waitKey;
+  float headlightIntensity;
 
   // ==============
   //   TELEMETRY
   // ==============
 
+  // main
+  float internalTemp, internalHumid;
+  float longitude, latitude;
+  float batteryLevel;
+  int robotStatus;
+
   // base
   float targetRPM[noOfMotors];
   float measuredRPM[noOfMotors];
 
-  // ===================
-  //   LIVE PID TUNING
-  // ===================
-
-  float Kp[noOfMotors];
-  float Ki[noOfMotors];
-  float Kd[noOfMotors];
-
 } ESP32TELE;
 
-
-ESP32TELE base; // ESP-NOW message structure object
+ESP32TELE viewer; // ESP-NOW message structure object
 esp_now_peer_info_t peerInfo;
 TFT_eSPI tft = TFT_eSPI();
 SPIClass touchscreenSPI = SPIClass(VSPI);
@@ -150,21 +159,30 @@ XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
 // callback function that will be executed when data is received, passes all values from the controller to the respective variables
 void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
   dcTimeoutMillis = millis();
-  memcpy(&base, incomingData, sizeof(base));
+  memcpy(&viewer, incomingData, sizeof(viewer));
 
-  if (base.deviceID == BASE_TELEOP){
-    xPos = base.xPos;
-    yPos = base.yPos;
-    wPos = base.wPos;
-    autoOrManual = base.autoOrManual;
-    resetOdom = base.resetOdom;
-    waitForKey = base.waitKey;
+  if (viewer.deviceID == MAIN_TELEOP){
+    xPos = viewer.xPos;
+    yPos = viewer.yPos;
+    wPos = viewer.wPos;
+    autoOrManual = viewer.autoOrManual;
+    resetOdom = viewer.resetOdom;
+    waitForKey = viewer.waitKey;
   }
-  else if (base.deviceID == BASE_TELEM){
-    measuredRPM[0] = base.measuredRPM[0];
-    measuredRPM[1] = base.measuredRPM[1];
-    measuredRPM[2] = base.measuredRPM[2];
-    measuredRPM[3] = base.measuredRPM[3];
+  else if (viewer.deviceID == BASE_TELEOP){
+    restartDriver = viewer.restartDriver;
+  }
+  else if (viewer.deviceID == MAIN_TELEM){
+    internalTemp = viewer.internalTemp;
+    internalHumid = viewer.internalHumid;
+    batteryLevel = viewer.batteryLevel;
+    robotStatus = viewer.robotStatus;
+  }
+  else if (viewer.deviceID == BASE_TELEM){
+    measuredRPM[0] = viewer.measuredRPM[0];
+    measuredRPM[1] = viewer.measuredRPM[1];
+    measuredRPM[2] = viewer.measuredRPM[2];
+    measuredRPM[3] = viewer.measuredRPM[3];
   }
 
 }

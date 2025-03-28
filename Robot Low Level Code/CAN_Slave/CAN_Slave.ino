@@ -24,7 +24,11 @@
 #define RX 23  // Connect to RX Pin of the CAN module
 #define TX 32  // connect to TX Pin of the CAN module
 
+// Buzzer pin
+#define buzzerPin 5
+#define buzzerChannel 0
 
+// Wheel velocity status LEDs
 #define flLEDPin 12  // for status
 #define frLEDPin 2  // for status
 #define blLEDPin 13  // for status
@@ -57,7 +61,7 @@ bool pidTune = false; // Live PID tuning
 
 
 // ESP-NOW
-enum deviceID { BASE_TELEOP, BASE_TELEM }; // Enumeration (to differentiate between which controller board sends out what data)
+enum deviceID { MAIN_TELEOP, BASE_TELEOP, MAIN_TELEM, BASE_TELEM }; // Enumeration (to differentiate between which controller board sends out what data)
 uint8_t chan = 5; // To prevent interference-induced lagging, might want to switch to another channel (0 to 11);
 uint8_t broadcastAddress[] = { 0x48, 0xCA, 0x43, 0x9B, 0x5E, 0x98 };  // Remote controller MAC Address
 
@@ -77,16 +81,9 @@ int direction[noOfMotors] = { 0, 0, 0, 0 };       // target direction of the mot
 // Velocity calculations
 float velocity[noOfMotors] = { 0, 0, 0, 0 };
 
-// PID constants (CHANGE THESE TO MATCH YOUR ROBOT'S BASE PERFORMANCE)
-// |
-// |
-// V
-float Kp[noOfMotors] = { 1.8, 1.8, 1.65, 1.65 };
-float Ki[noOfMotors] = { 0.0, 0.0, 0.0, 0.0 };
-float Kd[noOfMotors] = { 0.002, 0.002, 0.002, 0.002 };
-
 // Flags to determine whether operations are done or not
 bool gotCmdVelData = false; // check for presence of cmd vel data
+bool restartDriver = false;
 
 // For non-blocking delays
 unsigned long prevDCTimeoutMillis = 0;
@@ -108,28 +105,27 @@ typedef struct ESP32TELE {
   //   TELEOPERATION
   // ==================
 
-  // base
+  // main
   float xPos, yPos, wPos;
-  bool autoOrManual, resetOdom, waitKey;
+  bool autoOrManual, resetOdom, restartDriver, waitKey;
+  float headlightIntensity;
 
   // ==============
   //   TELEMETRY
   // ==============
 
+  // main
+  float internalTemp, internalHumid;
+  float longitude, latitude;
+  float batteryLevel;
+  int robotStatus;
+
   // base
   float targetRPM[noOfMotors];
   float measuredRPM[noOfMotors];
 
-  // ===================
-  //   LIVE PID TUNING
-  // ===================
-
-  float Kp[noOfMotors];
-  float Ki[noOfMotors];
-  float Kd[noOfMotors];
-
-
 } ESP32TELE;
+
 
 ESP32TELE base; // ESP-NOW message structure object
 CanFrame txFrame = { 0 };
@@ -147,26 +143,12 @@ void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
   memcpy(&base, incomingData, sizeof(base));
 
   if (base.deviceID == BASE_TELEOP){
-    Kp[0] = base.Kp[0];
-    Kp[1] = base.Kp[1];
-    Kp[2] = base.Kp[2];
-    Kp[3] = base.Kp[3];  
-
-    Ki[0] = base.Ki[0];
-    Ki[1] = base.Ki[1];
-    Ki[2] = base.Ki[2];
-    Ki[3] = base.Ki[3];
-
-    Kd[0] = base.Kd[0];
-    Kd[1] = base.Kd[1];
-    Kd[2] = base.Kd[2];
-    Kd[3] = base.Kd[3];
+    restartDriver = base.restartDriver;
   }    
 }
 
 // ESP-NOW send callback
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-
 }
 
 //====================== TASK FUNCTIONS ==========================
@@ -296,13 +278,16 @@ void canReceiveSDO(bool readWheelSpeed){
         else if (rxFrame.identifier == RX_ID_2){
           // ensure that you are actually getting wheel speed data
           if (checkDataType == 0x606C){
+            // take note that the motor driver in the robot is flipped
+            // so need to invert on the software side
+
             // BLW speed
             if (rxFrame.data[3] == 1){
-              velocity[2] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+              velocity[3] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
             }
             // BRW speed
             else if (rxFrame.data[3] == 2){
-              velocity[3] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+              velocity[2] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
             }
           }
         }
@@ -348,6 +333,9 @@ void readCmdVel(){
         direction[i] = ((rxFrame.data[i + 4] == 0) ? -1 : 1);      
       }
       gotCmdVelData = true;
+    }
+    else{
+      Serial.println(rxFrame.identifier, HEX);
     }
   }
 
@@ -431,24 +419,24 @@ void driverStartup(){
   canSendSDO(TX_ID_2, 1, 0x6060, 0x00, 0x03); // select Speed mode operation 
   delay(10);
 
-  canSendSDO(TX_ID_1, 4, 0x6083, 0x01, 0x64); // Acceleration time (100 ms) for left wheel
+  canSendSDO(TX_ID_1, 4, 0x6083, 0x01, 10); // Acceleration time (10 ms) for left wheel
   delay(10);
-  canSendSDO(TX_ID_2, 4, 0x6083, 0x01, 0x64); // Acceleration time (100 ms) for left wheel
-  delay(10);
-
-  canSendSDO(TX_ID_1, 4, 0x6083, 0x02, 0x64); // Acceleration time (100 ms) for right wheel
-  delay(10);
-  canSendSDO(TX_ID_2, 4, 0x6083, 0x02, 0x64); // Acceleration time (100 ms) for right wheel
+  canSendSDO(TX_ID_2, 4, 0x6083, 0x01, 10); // Acceleration time (10 ms) for left wheel
   delay(10);
 
-  canSendSDO(TX_ID_1, 4, 0x6084, 0x01, 100); // Deceleration time (100 ms) for left wheel
+  canSendSDO(TX_ID_1, 4, 0x6083, 0x02, 10); // Acceleration time (10 ms) for right wheel
   delay(10);
-  canSendSDO(TX_ID_2, 4, 0x6084, 0x01, 100); // Deceleration time (100 ms) for left wheel
+  canSendSDO(TX_ID_2, 4, 0x6083, 0x02, 10); // Acceleration time (10 ms) for right wheel
   delay(10);
 
-  canSendSDO(TX_ID_1, 4, 0x6084, 0x02, 100); // Deceleration time (100 ms) for right wheel
+  canSendSDO(TX_ID_1, 4, 0x6084, 0x01, 10); // Deceleration time (10 ms) for left wheel
   delay(10);
-  canSendSDO(TX_ID_2, 4, 0x6084, 0x02, 100); // Deceleration time (100 ms) for right wheel
+  canSendSDO(TX_ID_2, 4, 0x6084, 0x01, 10); // Deceleration time (10 ms) for left wheel
+  delay(10);
+
+  canSendSDO(TX_ID_1, 4, 0x6084, 0x02, 10); // Deceleration time (10 ms) for right wheel
+  delay(10);
+  canSendSDO(TX_ID_2, 4, 0x6084, 0x02, 10); // Deceleration time (10 ms) for right wheel
   delay(10);
 
   // enable the driver
@@ -514,8 +502,6 @@ void setup() {
       Serial.println("CAN bus failed!");
   }
 
-  driverStartup();
-
   // ==============
   //    ESP-NOW 
   // ==============
@@ -548,10 +534,21 @@ void setup() {
   }
 
   // ESP-NOW receive callback function
-  // Only works if live PID tuning is enabled in the code
-  if (pidTune){
-    esp_now_register_recv_cb(OnDataRecv);    
-  }
+  esp_now_register_recv_cb(OnDataRecv);    
+
+  delay(1000);  // wait for the motor drivers to finish initializing when powered up
+  driverStartup();
+
+  // =============
+  //     SOUND
+  // =============
+  ledcSetup(buzzerChannel, 2000, 8);
+  ledcAttachPin(buzzerPin, 0);
+
+  ledcWriteNote(buzzerChannel, NOTE_F, 5);
+  delay(100);
+  ledcWrite(buzzerChannel, 0);
+  delay(10);
 
   // indicate start of operation
   digitalWrite(flLEDPin, HIGH);
@@ -599,5 +596,15 @@ void loop() {
         canSendSDO(TX_ID_2, 4, 0x60FF, 0x02, 0x00);
       }
     }
+  }
+
+  if (restartDriver){
+    ledcWriteNote(buzzerChannel, NOTE_B, 5);
+    Serial.println("driver restarted");
+    delay(50);
+    driverStartup();
+  }
+  else{
+    ledcWrite(buzzerChannel, 0);
   }
 }

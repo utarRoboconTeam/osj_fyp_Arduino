@@ -25,6 +25,8 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
+#include <DHT.h>
+#include <DHT_U.h>
 
 // ||==============================||
 // ||          DEFINITIONS         ||
@@ -34,13 +36,29 @@
 #define TX 32  // connect to TX Pin of the CAN module
 
 // Addressable LEDs pin and quantity
-#define LED_NUM 32
+#define LED_NUM 60
 #define LED_PIN 27
+#define LED_PIN2 14
 
+// Velocity LED pins
 #define flLEDPin 12  // for status
 #define frLEDPin 2  // for status
 #define blLEDPin 13  // for status
 #define brLEDPin 15  // for status
+
+// Head Lights pin
+#define headlightPin 17
+
+// Buzzer pin
+#define buzzerPin 5
+#define buzzerChannel 0
+
+// Internal condition monitoring pin
+#define DHTPIN 16     // Digital pin connected to the DHT sensor 
+#define DHTTYPE    DHT11     // DHT 11
+
+// Battery level sense wire
+#define batteryPin 36
 
 // GPS pins
 #define RXPin 18
@@ -51,10 +69,13 @@
 #define RESET_TIMEFRAME 1000
 #define DC_TIMEFRAME 1000
 #define SERIAL_TIMEFRAME 100
-#define IMU_TIMEFRAME 100
+#define SENSOR_TIMEFRAME 100
 #define LED_TIMEFRAME 100
 #define CAN_TIMEFRAME 50 // 50 ms
-#define LED_BLINK_DELAY_SLOW 100  // 100 ms
+#define LED_BLINK_DELAY_SLOW 200  // 200 ms
+#define TONE_TIMEFRAME 10000 // 10s
+#define ESPNOW_TIMEFRAME 50
+#define CHANGE_TONE_TIMEFRAME 200
 
 // DC motor constants
 #define noOfMotors 4
@@ -62,12 +83,20 @@
 #define motorMinPWM -motorMaxPWM
 #define wheelSeparation 0.35  // Measured from left side of wheels to right side of wheels in meters
 
+// Battery constants
+#define DANGEROUS_BATTERY_LEVEL 10
+
+#define RX_ID_1 0x581
+#define RX_ID_2 0x582
+
+
 // ||==============================||
 // ||           VARIABLES          ||
 // ||==============================||
 // ESP-NOW
-enum deviceID { BASE_TELEOP, BASE_TELEM }; // Enumeration (to differentiate between which controller board sends out what data)
+enum deviceID { MAIN_TELEOP, BASE_TELEOP, MAIN_TELEM, BASE_TELEM }; // Enumeration (to differentiate between which controller board sends out what data)
 uint8_t chan = 5; // <======= NOTE! Check if the selected ESP-NOW channel is quiet or not
+uint8_t broadcastAddress[] = { 0x48, 0xCA, 0x43, 0x9B, 0x5E, 0x98 };  // Remote controller MAC Address
 
 
 // CAN bus
@@ -136,11 +165,21 @@ float w = 0;
 float roll = 0.0;
 float pitch = 0.0;
 float yaw = 0.0;
+float rollVel = 0.0;
+float pitchVel = 0.0;
+float yawVel = 0.0;
+float xAccel = 0.0;
+float yAccel = 0.0;
+float zAccel = 0.0;
 
 // gps coordinates
 float gpsLat = 8888.0;
 float gpsLong = 8888.0;
 
+// DHT11
+float internalTemp = 8888.0;
+float internalHumid = 8888.0;
+float batteryLevel = 8888.0;
 
 // variables used for serial data parsing
 int indexCmd = 0;  // index variable for array
@@ -152,10 +191,17 @@ unsigned long previousResetMillis = 0;
 unsigned long dcTimeoutMillis = 0;
 unsigned long prevContinueMillis = 0;
 unsigned long prevSerialMillis = 0;
-unsigned long prevIMUMillis = 0;
+unsigned long prevSensorMillis = 0;
 unsigned long prevLEDStatusMillis = 0;
 unsigned long prevCANMillis = 0;
+unsigned long prevESPNOWMillis = 0;
+unsigned long prevToneMillis = 0;
+unsigned long prevNoteMillis = 0;
 
+
+// ------------------
+// OBJECTS
+// ------------------
 // Structure example to send data
 // Must match the receiver structure
 typedef struct ESP32TELE {
@@ -167,30 +213,30 @@ typedef struct ESP32TELE {
   //   TELEOPERATION
   // ==================
 
-  // base
+  // main
   float xPos, yPos, wPos;
-  bool autoOrManual, resetOdom, waitKey;
+  bool autoOrManual, resetOdom, restartDriver, waitKey;
+  float headlightIntensity;
 
   // ==============
   //   TELEMETRY
   // ==============
 
+  // main
+  bool fixStatus;
+  float internalTemp, internalHumid;
+  float longitude, latitude, altitude;
+  float batteryLevel;
+  int robotStatus;
+
   // base
   float targetRPM[noOfMotors];
   float measuredRPM[noOfMotors];
 
-  // ===================
-  //   LIVE PID TUNING
-  // ===================
-
-  float Kp[noOfMotors];
-  float Ki[noOfMotors];
-  float Kd[noOfMotors];
-
 } ESP32TELE;
 
 
-ESP32TELE base; // ESP-NOW message structure object
+ESP32TELE head; // ESP-NOW message structure object
 esp_now_peer_info_t peerInfo;
 CRGB leds[LED_NUM];
 TinyGPSPlus gps;  // The TinyGPSPlus object
@@ -198,6 +244,8 @@ SoftwareSerial gpsSerial(RXPin, TXPin);  // The serial connection to the GPS dev
 CanFrame txFrame = { 0 };
 CanFrame rxFrame;
 Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x29);
+DHT_Unified dht(DHTPIN, DHTTYPE);
+
 
 // ||==============================||
 // ||           FUNCTIONS          ||
@@ -208,23 +256,24 @@ Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x29);
 // callback function that will be executed when data is received, passes all values from the controller to the respective variables
 void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
   dcTimeoutMillis = millis();
-  memcpy(&base, incomingData, sizeof(base));
+  prevToneMillis = millis();
+  prevNoteMillis = millis();
 
-  if (base.deviceID == BASE_TELEOP){
-    x = base.xPos;
-    y = base.yPos;
-    w = base.wPos;
-    autoOrManual = base.autoOrManual;
-    resetOdom = base.resetOdom;
-    waitForKey = base.waitKey;
-  }
-  else if (base.deviceID == BASE_TELEM){
-    measuredRPM[0] = base.measuredRPM[0];
-    measuredRPM[1] = base.measuredRPM[1];
-    measuredRPM[2] = base.measuredRPM[2];
-    measuredRPM[3] = base.measuredRPM[3];
+  memcpy(&head, incomingData, sizeof(head));
+
+  if (head.deviceID == MAIN_TELEOP){
+    x = head.xPos;
+    y = head.yPos;
+    w = head.wPos;
+    autoOrManual = head.autoOrManual;
+    resetOdom = head.resetOdom;
+    waitForKey = head.waitKey;
   }
 
+}
+
+// send callback
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 }
 
 //====================== TASK FUNCTIONS ==========================
@@ -264,7 +313,7 @@ void resetCommand() {
   x = 0;
   y = 0;
   w = 0;
-  msgID = 0;
+  msgID = 0x0001;
 }
 
 
@@ -285,6 +334,18 @@ void sendDataToPC() {
   Serial.print(pitch);
   Serial.print("/");
   Serial.print(yaw);
+  Serial.print("/");
+  Serial.print(rollVel);
+  Serial.print("/");
+  Serial.print(pitchVel);
+  Serial.print("/");
+  Serial.print(yawVel);
+  Serial.print("/");
+  Serial.print(xAccel);
+  Serial.print("/");
+  Serial.print(yAccel);
+  Serial.print("/");
+  Serial.print(zAccel);
   Serial.print(":");
   Serial.print(measuredRPM[0]);
   Serial.print("/");
@@ -311,7 +372,6 @@ void skidSteeringKinematics(float yInput, float wInput, int* FLWOut, int* FRWOut
   analogWrite(brLEDPin, abs(*BRWOut));
 
 }
-
 
 // Show the robot status through the RGB LEDs
 void ledStatus (unsigned int status){
@@ -431,14 +491,119 @@ void ledStatus (unsigned int status){
 }
 
 void getIMUData(){
-  sensors_event_t event; 
-  bno.getEvent(&event);
+  sensors_event_t orientationData, angVelocityData, linearAccelData; 
+  bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+  bno.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);
+  bno.getEvent(&linearAccelData, Adafruit_BNO055::VECTOR_LINEARACCEL);
 
-  roll = event.orientation.z;
-  pitch = event.orientation.y;
-  yaw = event.orientation.x;
+
+  roll = orientationData.orientation.z;
+  pitch = orientationData.orientation.y;
+  yaw = orientationData.orientation.x;
+  rollVel = angVelocityData.gyro.z;
+  pitchVel = angVelocityData.gyro.y;
+  yawVel = angVelocityData.gyro.x;
+  xAccel = linearAccelData.acceleration.x;
+  yAccel = linearAccelData.acceleration.y;
+  zAccel = linearAccelData.acceleration.z;
 
 }
+
+void getDHTData(){
+  sensors_event_t event;
+  dht.temperature().getEvent(&event);
+  if (isnan(event.temperature)) {
+    internalTemp = 8888.0;
+  }
+  else {
+    internalTemp = event.temperature;
+  }
+  // Get humidity event and print its value.
+  dht.humidity().getEvent(&event);
+  if (isnan(event.relative_humidity)) {
+    internalHumid = 8888.0;
+  }
+  else {
+    internalHumid = event.relative_humidity;
+  }
+}
+
+float getBatteryData(){
+  const int r1 = 1E6;
+  const int r2 = 68E3;
+  
+  float rawVoltage = analogRead(batteryPin) * (3.3 / 4096);
+
+  // Use Ohm's Law to get this value
+  // R1 = 1M Ohm, R2 = 68k Ohm, max voltage drop across R2 is around 2.674V when battery is at max voltage of 42V
+  float batteryVoltage = ((r1 + r2) / r2) * rawVoltage;
+
+  return batteryVoltage;
+}
+
+void readWheelSpeeds(){
+  // You can set custom timeout, default is 1000
+  if(ESP32Can.readFrame(rxFrame, 0)) {
+
+    int16_t checkDataType = (rxFrame.data[2] << 8) | (rxFrame.data[1]);
+    // if the wheel speed data is coming from node 1
+    if (rxFrame.identifier == RX_ID_1){
+      // ensure that you are actually getting wheel speed data
+      if (checkDataType == 0x606C){
+        // FLW speed
+        if (rxFrame.data[3] == 1){
+          measuredRPM[0] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+        }
+        // FRW speed
+        else if (rxFrame.data[3] == 2){
+          measuredRPM[1] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+        }
+      }          
+    }
+
+    // if the wheel speed data is coming from node 2
+    else if (rxFrame.identifier == RX_ID_2){
+      // ensure that you are actually getting wheel speed data
+      if (checkDataType == 0x606C){
+        // BLW speed
+        if (rxFrame.data[3] == 1){
+          measuredRPM[3] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+        }
+        // BRW speed
+        else if (rxFrame.data[3] == 2){
+          measuredRPM[2] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+        }
+      }
+    }
+  }
+}
+
+
+void buzzerStatus(){
+  unsigned long currMillis = millis();
+  static unsigned long prevBuzzerMillis = 0;
+  static int buzzerSequence = 0;
+
+  float mappedBatteryLevel = map(batteryLevel, 30, 42, 0, 100);
+
+  if (mappedBatteryLevel < DANGEROUS_BATTERY_LEVEL){
+    if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 0){
+      ledcWriteNote(0, NOTE_D, 5);
+      buzzerSequence = 1;
+      prevBuzzerMillis = currMillis;
+    }
+    else if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 1){
+      ledcWrite(0, 0);
+      buzzerSequence = 0;
+      prevBuzzerMillis = currMillis;
+    }   
+  }
+
+  else{
+    ledcWrite(0, 0);
+  }
+}
+
 
 // execute the serial input command along with the specified argument values
 void runAuto() {
@@ -455,8 +620,7 @@ void runAuto() {
   // left and right motors, accept 2 arguments (left speed & right speed, respectively,
   // with -ve sign indicating opposite direction)
   if (!runOnce) {
-    //msgID = 1;  // uncomment this to choose open-loop motion
-    msgID = 2;  // uncomment this to choose closed-loop motion
+    msgID = 0x0001;  // uncomment this to choose closed-loop motion
     previousResetMillis = currentMillis;
     runOnce = true;
   }
@@ -504,10 +668,14 @@ void setup() {
   pinMode(blLEDPin, OUTPUT);
   pinMode(brLEDPin, OUTPUT);
 
+  pinMode(headlightPin, OUTPUT);
+
   digitalWrite(flLEDPin, LOW);
   digitalWrite(frLEDPin, LOW);
   digitalWrite(blLEDPin, LOW);
   digitalWrite(brLEDPin, LOW);
+
+    //FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, NUM_LEDS);  // GRB ordering is assumed
 
   FastLED.addLeds<WS2812,LED_PIN,GRB>(leds,LED_NUM);
 
@@ -542,6 +710,11 @@ void setup() {
     
   bno.setExtCrystalUse(true);
 
+  // ==================
+  //    DHT11 SENSOR
+  // ==================
+  dht.begin();
+  sensor_t sensor;
 
   // ==============
   //    ESP-NOW 
@@ -561,11 +734,31 @@ void setup() {
     return;
   }
 
+  //Register callback
+  esp_now_register_send_cb(OnDataSent);
+
   // Once ESPNow is successfully Init, we will register for recv CB to
   // get recv packer info
   esp_now_register_recv_cb(OnDataRecv);
 
+  //Add peer
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add peer");
+    return;
+  }
 
+
+  // =============
+  //     SOUND
+  // =============
+  ledcSetup(buzzerChannel, 2000, 8);
+  ledcAttachPin(buzzerPin, 0);
+
+  ledcWriteNote(buzzerChannel, NOTE_C, 6);
+  delay(100);
+  ledcWrite(buzzerChannel, 0);
+  delay(10);
 
   // indicate start of operation
   digitalWrite(flLEDPin, HIGH);
@@ -592,13 +785,37 @@ void setup() {
 // |=======================================|
 void loop() {
   unsigned long currMillis = millis();
-
+  static short int noteSequence = 0;
   // Safety feature where if we do not receive any data from controller
   // Reset all command velocities to zero so that the robot ceases to move
   if (currMillis - dcTimeoutMillis >= DC_TIMEFRAME) {
     x = 0;
     y = 0;
     w = 0;
+
+    if (currMillis - prevToneMillis >= TONE_TIMEFRAME){
+      if (noteSequence == 0){
+        ledcWriteNote(buzzerChannel, NOTE_F, 5);
+        prevNoteMillis = currMillis;
+        noteSequence = 1;
+      }
+      if (currMillis - prevNoteMillis >= 100 && noteSequence == 1){
+        ledcWriteNote(buzzerChannel, NOTE_D, 4);
+        prevNoteMillis = currMillis;
+        noteSequence = 2;
+      }
+      else if (currMillis - prevNoteMillis >= 800 && noteSequence == 2){
+        ledcWrite(buzzerChannel, 0);
+        prevNoteMillis = currMillis;
+        prevToneMillis = currMillis;
+        noteSequence = 0;
+      }
+      
+      delay(10);
+    }
+  }
+  else{
+    buzzerStatus();
   }
 
   // ========================================
@@ -692,7 +909,8 @@ void loop() {
     // the motor from running right away by ensuring there is always valid CAN message
     // being transmitted
     else{
-      msgID = 2;
+      msgID = 0x0001;
+      skidSteeringKinematics(y, w, &FLW, &FRW, &BLW, &BRW);
       PFLW = 0;         // Left wheel speed
       PFRW = 0;         // Right wheel speed
       PBLW = 0;         // Left wheel direction
@@ -757,6 +975,7 @@ void loop() {
 
   ESP32Can.writeFrame(txFrame);  // timeout defaults to 1 ms
 
+  readWheelSpeeds();
 
   // Send odometry and other data to PC via serial
   if (currMillis - prevSerialMillis >= SERIAL_TIMEFRAME){
@@ -765,9 +984,24 @@ void loop() {
   }
 
     // Send odometry and other data to PC via serial
-  if (currMillis - prevIMUMillis >= IMU_TIMEFRAME){
-    getIMUData();    
-    prevIMUMillis = currMillis;
+  if (currMillis - prevSensorMillis >= SENSOR_TIMEFRAME){
+    getIMUData();   
+    getDHTData();
+    batteryLevel = getBatteryData();
+    prevSensorMillis = currMillis;
+  }
+
+  // Send telemetry back to controller
+  if (currMillis - prevESPNOWMillis >= ESPNOW_TIMEFRAME){
+    head.deviceID = MAIN_TELEM;
+    head.internalTemp = internalTemp;
+    head.internalHumid = internalHumid;
+    head.longitude = gpsLong;
+    head.latitude = gpsLat;
+    head.batteryLevel = batteryLevel;
+    head.robotStatus = ledStatusCode;
+    esp_err_t toController = esp_now_send(broadcastAddress, (uint8_t *)&head, sizeof(head));
+    prevESPNOWMillis = currMillis;
   }
 
   // Change the led colour of the robot depending on the modes

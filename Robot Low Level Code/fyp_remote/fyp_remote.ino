@@ -71,9 +71,16 @@ Last Updated: 7th November 2024
 #define MaxReadings 50          //For smoothening left joystick; Adjustable; larger number = more delay but smoother.
 #define ADC_bit 12              // ADC measurement
 
+// Battery constants
+#define LOW_BATTERY_LEVEL 25
+#define DANGEROUS_BATTERY_LEVEL 10
+
+
 // Time constants
 #define ESPNOW_TIMEFRAME 50  // 50 ms
 #define DISPLAY_TIMEFRAME 200
+#define CLICK_SOUND_TIMEFRAME 100
+#define CHANGE_TONE_TIMEFRAME 200
 #define debounce 200UL
 
 
@@ -85,13 +92,14 @@ bool useZPower = false; // true to use amplified z axis data, false to use norma
 bool pidTune = false;  // true to enable live PID tuning, false to disable it
 
 // ESP-NOW
-enum deviceID { BASE_TELEOP, BASE_TELEM };
+enum deviceID { MAIN_TELEOP, BASE_TELEOP, MAIN_TELEM, BASE_TELEM }; // Enumeration (to differentiate between which controller board sends out what data)
 uint8_t chan = 5;   // To prevent interference-induced lagging, might want to switch to another channel (0 to 11);
 uint8_t broadcastAddress1[] = { 0xA0, 0xA3, 0xB3, 0x8A, 0x7D, 0x88 };  // Main Controller
-uint8_t broadcastAddress2[] = { 0xA0, 0xA3, 0xB3, 0x8A, 0x67, 0xD8 };  // Base Controller
-uint8_t broadcastAddress3[] = { 0xD8, 0xBC, 0x38, 0xFC, 0x2D, 0xF8 };  // Telemetry Viewer
+uint8_t broadcastAddress2[] = { 0xD8, 0xBC, 0x38, 0xFC, 0x2D, 0xF8 };  // Telemetry Viewer
+uint8_t broadcastAddress3[] = { 0xA0, 0xA3, 0xB3, 0x8A, 0x67, 0xD8 };  // Base Controller
 
 // Addressable LED parameters
+enum LED_STATUS {OFFLINE, MANUAL, AUTO, WAIT, RUNNING, STOP, PERMIT, AUX2, AUX3}; // Show different status of robot through the LEDs
 unsigned int red = 0, green = 0, blue = 0;  // onboard LED RGB values
 
 // Joystick
@@ -103,40 +111,31 @@ int joystickx, joysticky, joystickz, joystickd;
 // Buttons
 // for mode changing
 int enableReading, prevEnableReading;
-
-// For live PID tuning
-bool nextPage = false, prevNextPage = false;
-bool prevPage = false, prevPrevPage = false;
-bool increaseK = false, prevIncreaseK = false;
-bool decreaseK = false, prevDecreaseK = false;
-bool incSmallerK = false, prevIncSmallerK = false;
-bool decSmallerK = false, prevDecSmallerK = false;
-bool pidChngModeNextPage = false, prevPidChngModeNextPage = false;
-bool pidChngModePrevPage = false, prevPidChngModePrevPage = false;
-bool divSelectNext = false, prevDivSelectNext = false;
-bool divSelectPrev = false, prevDivSelectPrev = false;
-int pidPage = 0;
-int pidChangeModePage = 0;
-float divideBy = 1;
+int telemReading, prevTelemReading;
 
 // DC motors telemetry data
 float targetRPM[noOfMotors] = {0.0, 0.0, 0.0, 0.0};
 float measuredRPM[noOfMotors] = {0.0, 0.0, 0.0, 0.0};
 
-// PID constants for live PID tuning
-float Kp[noOfMotors] = { 0, 0, 0, 0 };
-float Ki[noOfMotors] = { 0, 0, 0, 0 };
-float Kd[noOfMotors] = { 0, 0, 0, 0 };
+// Main controller telemetry data
+float internalTemp = 8888.0;
+float internalHumid = 8888.0;
+float gpsLat = 8888.0;
+float gpsLong = 8888.0;
+float batteryLevel = 0.0;
+int robotStatus = OFFLINE;
 
 // Flags to indicate certain operations
 bool autoOrManual = false; // true to make it auto only
-bool odomResetting = false;
+bool resetOdom = false;
 bool updateDisplay = true; 
 bool waitForKey = false;
+bool restartDriver = false;
+bool telemToView = false;
 
 // for non-blocking delay
 unsigned long prevESPNOWMillis = 0;
-unsigned long prevEnableMillis = 0;
+unsigned long prevButtonMillis = 0;
 unsigned long prevDisplayMillis = 0;
 
 // to make sure the values are within the 12 bit range
@@ -208,26 +207,24 @@ typedef struct ESP32TELE {
   //   TELEOPERATION
   // ==================
 
-  // base
+  // main
   float xPos, yPos, wPos;
-  bool autoOrManual, resetOdom, waitKey;
+  bool autoOrManual, resetOdom, restartDriver, waitKey;
+  float headlightIntensity;
 
   // ==============
   //   TELEMETRY
   // ==============
 
+  // main
+  float internalTemp, internalHumid;
+  float longitude, latitude;
+  float batteryLevel;
+  int robotStatus;
+
   // base
   float targetRPM[noOfMotors];
   float measuredRPM[noOfMotors];
-
-  // ===================
-  //   LIVE PID TUNING
-  // ===================
-
-  float Kp[noOfMotors];
-  float Ki[noOfMotors];
-  float Kd[noOfMotors];
-
 
 } ESP32TELE;
 
@@ -264,324 +261,11 @@ void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
     measuredRPM[2] = tele.measuredRPM[2];
     measuredRPM[3] = tele.measuredRPM[3];
   }
-}
-
-
-
-// Live PID tuning function containing all the mess to change the PID constants for each motor
-void tunePID(){
-  if (nextPage != prevNextPage){
-    updateDisplay = true;
-    prevNextPage = nextPage;
-    // Only run the main segment if it is actually a pressed button
-    if (nextPage){
-      if (pidPage >= 2){
-        pidPage = 0;
-      }
-      else{
-        pidPage += 1;
-      }      
-    }
-  }
-  else if (prevPage != prevPrevPage){
-    updateDisplay = true;
-    prevPrevPage = prevPage;
-    // Only run the main segment if it is actually a pressed button
-    if (prevPage){
-      if (pidPage <= 0){
-        pidPage = 2;
-      }
-      else{
-        pidPage -= 1;
-      }      
-    }
-  }
-
-  else if (pidChngModeNextPage != prevPidChngModeNextPage){
-    updateDisplay = true;
-    prevPidChngModeNextPage = pidChngModeNextPage;
-    // Only run the main segment if it is actually a pressed button
-    if (pidChngModeNextPage){
-      if (pidChangeModePage >= noOfMotors){
-        pidChangeModePage = 0;
-      }
-      else{
-        pidChangeModePage += 1;
-      }      
-    }
-  }
-
-  else if (pidChngModePrevPage != prevPidChngModePrevPage){
-    updateDisplay = true;
-    prevPidChngModePrevPage = pidChngModePrevPage;
-    // Only run the main segment if it is actually a pressed button
-    if (pidChngModePrevPage){
-      if (pidChangeModePage <= 0){
-        pidChangeModePage = noOfMotors;
-      }
-      else{
-        pidChangeModePage -= 1;
-      }      
-    }
-  }
-
-  else if (divSelectNext != prevDivSelectNext){
-    updateDisplay = true;
-    prevDivSelectNext = divSelectNext;
-    // Only run the main segment if it is actually a pressed button
-    if (divSelectNext){
-      divideBy *= 0.1;
-    }
-  }
-
-  else if (divSelectPrev != prevDivSelectPrev){
-    updateDisplay = true;
-    prevDivSelectPrev = divSelectPrev;
-    // Only run the main segment if it is actually a pressed button
-    if (divSelectPrev){
-      divideBy *= 10;
-    }
-  }
-
-  else if (increaseK != prevIncreaseK){
-    updateDisplay = true;
-    prevIncreaseK = increaseK;
-    // Only run the main segment if it is actually a pressed button
-    if (increaseK){
-      switch(pidPage){
-        case 0:
-          if (pidChangeModePage == 0){
-            Kp[0] += 1;
-            Kp[1] += 1;
-            Kp[2] += 1;
-            Kp[3] += 1;                        
-          }
-          else {
-            Kp[pidChangeModePage - 1] += 1;
-          }
-          break;
-        case 1:
-          if (pidChangeModePage == 0){
-            Ki[0] += 1;
-            Ki[1] += 1;
-            Ki[2] += 1;            
-            Ki[3] += 1;            
-          }
-          else {
-            Ki[pidChangeModePage - 1] += 1;
-          }
-          break;
-        case 2:
-          if (pidChangeModePage == 0){
-            Kd[0] += 1;
-            Kd[1] += 1;
-            Kd[2] += 1;            
-            Kd[3] += 1;            
-          }
-          else {
-            Kd[pidChangeModePage - 1] += 1;
-          }
-          break;
-      }      
-    }
-  }
-  
-  else if (decreaseK != prevDecreaseK){
-    updateDisplay = true;
-    prevDecreaseK = decreaseK;
-    // Only run the main segment if it is actually a pressed button
-    if (decreaseK){
-      switch(pidPage){
-        case 0:
-          if (pidChangeModePage == 0){
-            Kp[0] -= 1;
-            Kp[1] -= 1;
-            Kp[2] -= 1;  
-            Kp[3] -= 1;            
-          }
-          else {
-            Kp[pidChangeModePage - 1] -= 1;
-          }
-          break;
-        case 1:
-          if (pidChangeModePage == 0){
-            Ki[0] -= 1;
-            Ki[1] -= 1;
-            Ki[2] -= 1;
-            Ki[3] -= 1;                        
-          }
-          else {
-            Ki[pidChangeModePage - 1] -= 1;
-          }
-          break;
-        case 2:
-          if (pidChangeModePage == 0){
-            Kd[0] -= 1;
-            Kd[1] -= 1;
-            Kd[2] -= 1;            
-            Kd[3] -= 1;            
-          }
-          else {
-            Kd[pidChangeModePage - 1] -= 1;
-          }
-          break;
-        default:
-          break;
-      }
-    }
-  }
-  
-  else if (incSmallerK != prevIncSmallerK){
-    updateDisplay = true;
-    prevIncSmallerK = incSmallerK;
-    // Only run the main segment if it is actually a pressed button
-    if (incSmallerK){
-      switch(pidPage){
-        case 0:
-          if (pidChangeModePage == 0){
-            Kp[0] += 0.1 * divideBy;
-            Kp[1] += 0.1 * divideBy;
-            Kp[2] += 0.1 * divideBy;
-            Kp[3] += 0.1 * divideBy;
-          }
-          else{
-            Kp[pidChangeModePage - 1] += 0.1 * divideBy;
-          }
-          break;
-        case 1:
-          if (pidChangeModePage == 0){
-            Ki[0] += 0.1 * divideBy;
-            Ki[1] += 0.1 * divideBy;
-            Ki[2] += 0.1 * divideBy;
-            Ki[3] += 0.1 * divideBy;
-          }
-          else{
-            Ki[pidChangeModePage - 1] += 0.1 * divideBy;
-          }
-          break;
-        case 2:
-          if (pidChangeModePage == 0){
-            Kd[0] += 0.1 * divideBy;
-            Kd[1] += 0.1 * divideBy;
-            Kd[2] += 0.1 * divideBy;
-            Kd[3] += 0.1 * divideBy;
-          }
-          else{
-            Kd[pidChangeModePage - 1] += 0.1 * divideBy;
-          }
-          break;
-        default:
-          break;
-      }
-    }
-  }
-  else if (decSmallerK != prevDecSmallerK){
-    updateDisplay = true;
-    prevDecSmallerK = decSmallerK;
-    // Only run the main segment if it is actually a pressed button
-    if (decSmallerK){
-      switch(pidPage){
-        case 0:
-          if (pidChangeModePage == 0){
-            Kp[0] -= 0.1 * divideBy;
-            Kp[1] -= 0.1 * divideBy;
-            Kp[2] -= 0.1 * divideBy;
-            Kp[3] -= 0.1 * divideBy;
-          }
-          else{
-            Kp[pidChangeModePage - 1] -= 0.1 * divideBy;
-          }
-          break;
-        case 1:
-          if (pidChangeModePage == 0){
-            Ki[0] -= 0.1 * divideBy;
-            Ki[1] -= 0.1 * divideBy;
-            Ki[2] -= 0.1 * divideBy;
-            Ki[3] -= 0.1 * divideBy;
-          }
-          else{
-            Ki[pidChangeModePage - 1] -= 0.1 * divideBy;
-          }
-          break;
-        case 2:
-          if (pidChangeModePage == 0){
-            Kd[0] -= 0.1 * divideBy;
-            Kd[1] -= 0.1 * divideBy;
-            Kd[2] -= 0.1 * divideBy;
-            Kd[3] -= 0.1 * divideBy;
-          }
-          else{
-            Kd[pidChangeModePage - 1] -= 0.1 * divideBy;
-          }
-          break;
-        default:
-          break;
-      }
-    }
-  }
-}
-
-void pidTuneDisplay(){
-  if (updateDisplay){
-    updateDisplay = false;
-    display.clearDisplay();
-
-    display.setTextSize(1);
-
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(105, 40);
-    display.print("Div: ");
-    display.setCursor(90, 50);    
-    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print(divideBy * 0.1, 4);   
-
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(0, 0);
-    display.print("P:");    
-    display.print(pidPage == 0 && pidChangeModePage == 0 ? "<" : " ");
-    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print(Kp[0], 4);
-    display.print(pidPage == 0 && pidChangeModePage == 1 ? "<" : " ");
-    display.print(Kp[1], 4);
-    display.print(pidPage == 0 && pidChangeModePage == 2 ? "<" : " ");
-    display.setCursor(0, 10);  
-    display.print(Kp[2], 4);
-    display.print(pidPage == 0 && pidChangeModePage == 3 ? "<" : " ");
-    display.print(Kp[3], 4);
-    display.print(pidPage == 0 && pidChangeModePage == 4 ? "<" : " ");
-
-
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(0, 20);
-    display.print("I:");    
-    display.print(pidPage == 1 && pidChangeModePage == 0 ? "<" : " ");
-    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print(Ki[0], 4);
-    display.print(pidPage == 1 && pidChangeModePage == 1 ? "<" : " ");
-    display.print(Ki[1], 4);
-    display.print(pidPage == 1 && pidChangeModePage == 2 ? "<" : " ");
-    display.setCursor(0, 30);  
-    display.print(Ki[2], 4);
-    display.print(pidPage == 1 && pidChangeModePage == 3 ? "<" : " ");
-    display.print(Ki[3], 4);
-    display.print(pidPage == 1 && pidChangeModePage == 4 ? "<" : " ");
-
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(0, 40);
-    display.print("D:");    
-    display.print(pidPage == 2 && pidChangeModePage == 0 ? "<" : " ");
-    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print(Kd[0], 4);
-    display.print(pidPage == 2 && pidChangeModePage == 1 ? "<" : " ");
-    display.print(Kd[1], 4);
-    display.print(pidPage == 2 && pidChangeModePage == 2 ? "<" : " ");
-    display.setCursor(0, 50);
-    display.print(Kd[2], 4);
-    display.print(pidPage == 2 && pidChangeModePage == 3 ? "<" : " ");
-    display.print(Kd[3], 4);
-    display.print(pidPage == 2 && pidChangeModePage == 4 ? "<" : " ");
-
-    display.display();
+  else if (tele.deviceID == MAIN_TELEM){
+    internalTemp = tele.internalTemp;
+    internalHumid = tele.internalHumid;
+    batteryLevel = tele.batteryLevel;
+    robotStatus = tele.robotStatus;
   }
 }
 
@@ -589,6 +273,10 @@ void normalDisplay(){
   display.clearDisplay();
 
   display.setTextSize(1);
+
+  // -------------------------------------
+  //            SCREEN HEADER
+  // -------------------------------------
 
   // Control mode
   display.setTextColor(SH110X_WHITE);
@@ -602,59 +290,148 @@ void normalDisplay(){
     display.print("MANU");
   }
 
+  // Robot status
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(70, 0);
+  display.print("STAT:");
+  display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+  switch(robotStatus){
+    case OFFLINE:
+      display.print("OFF");
+      break;
+    case MANUAL:
+      display.print("MANU");
+      break;
+    case AUTO:
+      display.print("AUTO");
+      break;
+    case WAIT:
+      display.print("WAIT");
+      break;
+    case RUNNING:
+      display.print("RUN");
+      break;
+    case STOP:
+      display.print("STOP");
+      break;
+    case PERMIT:
+      display.print("PERM");
+      break;
+    default:
+      display.print("UNK");
+      break;
+  }
+
   display.drawLine(0, 10, 128, 10, SH110X_WHITE);
 
 
-  // Targeted direction of movement
-  // is odometry cleared?
+  // -------------------------------------
+  //             DATA DISPLAY
+  // -------------------------------------
 
-  if (!odomResetting){
+  // Input controls display and input pop-ups
+  if (!resetOdom && !restartDriver){
     display.drawLine(96, 15, 96 + map(POT1_Pos, 0, 255, 0, 28), 15, SH110X_WHITE);
     display.drawCircle(110, 40, 16, SH110X_WHITE);
     display.drawCircle(110 + (int)(xPos * 10), 40 - (int)(yPos * 10), 1, SH110X_WHITE);
     display.drawCircle(110 - (int)(wPos * 15), 20, 1, SH110X_WHITE);
   }
-  else {
+  // reset odom pop up
+  else if (resetOdom){
     display.setTextColor(SH110X_WHITE);
     display.setCursor(80, 20);
     display.print("ODOM");
-    display.setCursor(80, 30);
-    display.print("IS");
     display.setCursor(80, 40);
-    display.print("CLEARED!");
+    display.print("RESET!");
+  }
+  // restart driver pop up
+  else if (restartDriver){
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(80, 20);
+    display.print("DRIVER");
+    display.setCursor(80, 40);
+    display.print("RESET!");
   }
 
-  // Front Left Wheel speed
-  display.setTextColor(SH110X_WHITE);
-  display.setCursor(0, 15);
-  display.print("FLW:");
-  display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-  display.print((int)measuredRPM[0]);
-  display.print(" RPM");   
 
-  // Front Right Wheel speed
-  display.setTextColor(SH110X_WHITE);
-  display.setCursor(0, 25);
-  display.print("FRW:");
-  display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-  display.print((int)measuredRPM[1]);
-  display.print(" RPM");   
+  // switch between which telemetry data to view
+  if (!telemToView){
+    // Front Left Wheel speed
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(0, 13);
+    display.print("FLW:");
+    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.print((int)measuredRPM[0]);
+    display.print(" RPM");   
 
-  // Back Left Wheel speed
-  display.setTextColor(SH110X_WHITE);
-  display.setCursor(0, 35);
-  display.print("BLW:");
-  display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-  display.print((int)measuredRPM[2]);
-  display.print(" RPM"); 
+    // Front Right Wheel speed
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(0, 23);
+    display.print("FRW:");
+    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.print((int)measuredRPM[1]);
+    display.print(" RPM");   
 
-  // Back Right Wheel speed
-  display.setTextColor(SH110X_WHITE);
-  display.setCursor(0, 45);
-  display.print("BRW:");
-  display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-  display.print((int)measuredRPM[3]);
-  display.print(" RPM");    
+    // Back Left Wheel speed
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(0, 33);
+    display.print("BLW:");
+    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.print((int)measuredRPM[2]);
+    display.print(" RPM"); 
+
+    // Back Right Wheel speed
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(0, 43);
+    display.print("BRW:");
+    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.print((int)measuredRPM[3]);
+    display.print(" RPM");    
+
+  }
+
+  // Display robot condition
+  else{
+
+    // Temperature
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(0, 13);
+    display.print("T:");
+    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.print((String)internalTemp);
+    display.print(" C");
+
+    // Humidity
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(0, 23);
+    display.print("H:");
+    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.print((String)internalHumid);
+    display.print(" RH");
+
+    // Longitude
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(0, 33);
+    display.print("Long:");
+    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.print((String)gpsLong);
+
+    // Latitude
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(0, 43);
+    display.print("Lat:");
+    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.print((String)gpsLat);
+
+    // Battery Level
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(0, 53);
+    display.print("B:");
+    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.print((String)map(batteryLevel, 30, 42, 0, 100));
+    display.print(" %");
+  }
+
 
   display.display();
 }
@@ -663,6 +440,66 @@ void RGBLEDStatus(unsigned int red, unsigned int green, unsigned int blue){
   pixels.setPixelColor(0, pixels.Color(red, green, blue));
   pixels.show();
 }
+
+void buzzerStatus(){
+  unsigned long currMillis = millis();
+  static unsigned long prevBuzzerMillis = 0;
+  static unsigned long prevBuzzer2Millis = 0;
+  static int buzzerSequence = 0;
+  static bool playOnce = false;
+
+  // make a short beep sound to emulate button press sound whenever any of the buttons are pressed
+  if (enableReading || telemReading || resetOdom || waitForKey || restartDriver){
+    ledcWriteNote(0, NOTE_C, 4);
+    if (currMillis - prevBuzzer2Millis >= CLICK_SOUND_TIMEFRAME){
+      ledcWrite(0, 0);
+    }
+  }
+
+  else{
+    prevBuzzer2Millis = currMillis;
+    if (batteryLevel < DANGEROUS_BATTERY_LEVEL){
+      if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 0){
+        ledcWriteNote(0, NOTE_G, 5);
+        buzzerSequence = 1;
+        prevBuzzerMillis = currMillis;
+      }
+      else if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 1){
+        ledcWriteNote(0, NOTE_E, 5);
+        buzzerSequence = 0;
+        prevBuzzerMillis = currMillis;
+      }   
+    }
+
+    else if (batteryLevel < LOW_BATTERY_LEVEL && !playOnce){
+      if (buzzerSequence == 0){
+        ledcWriteNote(0, NOTE_G, 5);
+        buzzerSequence = 1;
+      }
+      else if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 1){
+        ledcWriteNote(0, NOTE_E, 5);
+        buzzerSequence = 2;
+        prevBuzzerMillis = currMillis;
+      }
+      else if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 2){
+        playOnce = true;
+        buzzerSequence = 0;
+      }
+    }
+
+    else if (batteryLevel > LOW_BATTERY_LEVEL){
+      prevBuzzerMillis = currMillis;
+      playOnce = false;
+      ledcWrite(0, 0);
+    }
+
+    else{
+      prevBuzzerMillis = currMillis;
+      ledcWrite(0, 0);
+    }
+  }
+}
+
 
 // check for initial position of both joysticks
 void calibrate() {
@@ -787,11 +624,14 @@ void setup() {
   // =============
   ledcSetup(0, 2000, 8);
   ledcAttachPin(buzzerPin, 0);
-  ledcWriteTone(0, 523.25);
+  //ledcWriteTone(0, 523.25);
+  ledcWriteNote(0, NOTE_C, 5);
   delay(350);
-  ledcWriteTone(0, 587.33);
+  //ledcWriteTone(0, 587.33);
+  ledcWriteNote(0, NOTE_D, 5);
   delay(350);
-  ledcWriteTone(0, 783.99);
+  //ledcWriteTone(0, 783.99);
+  ledcWriteNote(0, NOTE_G, 5);
   delay(350);
   ledcWrite(0, 0);
   delay(300);
@@ -893,14 +733,6 @@ void loop() {
   // if this zPower is not done and z value is used instead, the robot's yaw motion will be slow
   zPower = pow(z * rotateMultiplier, 5);
 
-  // switch between auto or manual control of robot 
-  enableReading = digitalRead(B6);
-  if (enableReading == 0 && prevEnableReading == 1 && currMillis - prevEnableMillis >= debounce) {
-    autoOrManual = !autoOrManual;
-    prevEnableMillis = currMillis;
-  }
-  prevEnableReading = enableReading;
-
   // Obtain the mapped joysticks values
   xBuf = x * (POT1_Pos / 255.0);
   yBuf = y * (POT1_Pos / 255.0);
@@ -908,101 +740,59 @@ void loop() {
   dBuf = d * (POT1_Pos / 255.0);
 
 
-  // ===============================================
-  //              LIVE PID TUNING MODE
-  // ===============================================
-  if (pidTune){
-    // Change the PID parameters to be tuned and other stuff
-    nextPage = digitalRead(B7) == HIGH ? true : false;
-    prevPage = digitalRead(B6) == HIGH ? true : false;
-    increaseK = digitalRead(B5) == HIGH ? true : false;
-    decreaseK = digitalRead(B8) == HIGH ? true : false;
-    incSmallerK = digitalRead(B1) == HIGH ? true : false;
-    decSmallerK = digitalRead(B4) == HIGH ? true : false;
-    pidChngModeNextPage = digitalRead(R1) == HIGH ? true : false;
-    pidChngModePrevPage = digitalRead(L1) == HIGH ? true : false;
-    divSelectNext = digitalRead(B2) == HIGH ? true : false;
-    divSelectPrev = digitalRead(B3) == HIGH ? true : false;
-
-    // tune the PID constants
-    tunePID();
-    pidTuneDisplay();
-
-    // Send data to Base via ESP-NOW
-    tele.deviceID = BASE_TELEOP;
-    tele.xPos = xBuf;
-    tele.yPos = yBuf;
-    tele.wPos = zBuf;
-    tele.autoOrManual = false;
-    tele.Kp[0] = Kp[0];
-    tele.Kp[1] = Kp[1];
-    tele.Kp[2] = Kp[2];
-    tele.Kp[3] = Kp[3];
-    tele.Ki[0] = Ki[0];
-    tele.Ki[1] = Ki[1];
-    tele.Ki[2] = Ki[2];
-    tele.Ki[3] = Ki[3];
-    tele.Kd[0] = Kd[0];
-    tele.Kd[1] = Kd[1];
-    tele.Kd[2] = Kd[2];
-    tele.Kd[3] = Kd[3];
-
-    // send the data
-    if (currMillis - prevESPNOWMillis >= ESPNOW_TIMEFRAME){
-      esp_err_t toMain = esp_now_send(broadcastAddress1, (uint8_t *)&tele, sizeof(tele));
-      esp_err_t toBase = esp_now_send(broadcastAddress2, (uint8_t *)&tele, sizeof(tele));
-      esp_err_t toTelem = esp_now_send(broadcastAddress3, (uint8_t *)&tele, sizeof(tele));
-      prevESPNOWMillis = currMillis;
-    }
-
-    // Uncomment these below to check for the wheel telemetry data
-    int whichMotor = 0;
-    Serial.print("TargetRPM:");
-    Serial.print(targetRPM[whichMotor]);
-    Serial.print(",");
-    Serial.print("MeasuredRPM:");
-    Serial.println(measuredRPM[whichMotor]);
-
-  }
-
   // ========================================================
   //                  NORMAL OPERATION MODE
   // ========================================================
-  else{
-    // switch between auto or manual control of robot 
-    enableReading = digitalRead(B6);
-    if (enableReading == 0 && prevEnableReading == 1 && currMillis - prevEnableMillis >= debounce) {
-      autoOrManual = !autoOrManual;
-      prevEnableMillis = currMillis;
-    }
-    prevEnableReading = enableReading;
+  // switch between auto or manual control of robot 
+  enableReading = digitalRead(B6);
+  if (enableReading == 1 && prevEnableReading == 0 && currMillis - prevButtonMillis >= debounce) {
+    autoOrManual = !autoOrManual;
+    prevButtonMillis = currMillis;
+  }
+  prevEnableReading = enableReading;
 
-    odomResetting = digitalRead(B5);
-    waitForKey = digitalRead(B8);
-    xPos = xBuf;
-    yPos = yBuf;        
-    wPos = zBuf;
+  // switch between the telemetry readings to check
+  telemReading = digitalRead(B3);
+  if (telemReading == 1 && prevTelemReading == 0 && currMillis - prevButtonMillis >= debounce) {
+    telemToView = !telemToView;
+    prevButtonMillis = currMillis;
+  }
+  prevTelemReading = telemReading;
+
+  resetOdom = digitalRead(B5);
+  waitForKey = digitalRead(B8);
+  restartDriver = digitalRead(B7);
+  xPos = xBuf;
+  yPos = yBuf;        
+  wPos = zBuf;
+  tele.xPos = xPos;
+  tele.yPos = yPos;
+  tele.wPos = wPos;    
+  tele.resetOdom = resetOdom;    
+  tele.autoOrManual = autoOrManual;
+  tele.waitKey = waitForKey;
+
+  buzzerStatus();
+
+  // send the data
+  if (currMillis - prevESPNOWMillis >= ESPNOW_TIMEFRAME){
+    tele.deviceID = MAIN_TELEOP;
+    esp_err_t toMain = esp_now_send(broadcastAddress1, (uint8_t *)&tele, sizeof(tele));
+    esp_err_t toTelem = esp_now_send(broadcastAddress2, (uint8_t *)&tele, sizeof(tele));
+    
+    // If the robot suddenly behaves weirdly in its motion or it ceases to move,
+    // most likely there was a power reset to the motor drivers
+    // need to restart it manually    
     tele.deviceID = BASE_TELEOP;
-    tele.xPos = xPos;
-    tele.yPos = yPos;
-    tele.wPos = wPos;    
-    tele.resetOdom = odomResetting;    
-    tele.autoOrManual = autoOrManual;
-    tele.waitKey = waitForKey;
-
-    // send the data
-    if (currMillis - prevESPNOWMillis >= ESPNOW_TIMEFRAME){
-      esp_err_t toMain = esp_now_send(broadcastAddress1, (uint8_t *)&tele, sizeof(tele));
-      //esp_err_t toTelem = esp_now_send(broadcastAddress3, (uint8_t *)&tele, sizeof(tele));
-      prevESPNOWMillis = currMillis;
-    }
-
-    if (currMillis - prevDisplayMillis >= DISPLAY_TIMEFRAME){
-      prevDisplayMillis = currMillis;
-      normalDisplay();    
-    }
+    tele.restartDriver = restartDriver;
+    esp_err_t toBase = esp_now_send(broadcastAddress3, (uint8_t *)&tele, sizeof(tele));
+    prevESPNOWMillis = currMillis;
   }
 
+  if (currMillis - prevDisplayMillis >= DISPLAY_TIMEFRAME){
+    prevDisplayMillis = currMillis;
+    normalDisplay();    
+  }
   RGBLEDStatus(red, green, blue);
 
   // Uncomment this to check which buttons correspond to which variables
