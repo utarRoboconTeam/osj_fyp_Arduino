@@ -78,10 +78,12 @@ Last Updated: 7th November 2024
 
 // Time constants
 #define ESPNOW_TIMEFRAME 50  // 50 ms
-#define DISPLAY_TIMEFRAME 200
+#define DISPLAY_TIMEFRAME 100
 #define CLICK_SOUND_TIMEFRAME 100
 #define CHANGE_TONE_TIMEFRAME 200
+#define NO_SIGNAL_TIMEFRAME 1000
 #define debounce 200UL
+
 
 
 // ||==============================||
@@ -116,12 +118,15 @@ int telemReading, prevTelemReading;
 // DC motors telemetry data
 float targetRPM[noOfMotors] = {0.0, 0.0, 0.0, 0.0};
 float measuredRPM[noOfMotors] = {0.0, 0.0, 0.0, 0.0};
+float robotSpeed = 0.0, robotAccel = 0.0;
+
 
 // Main controller telemetry data
-float internalTemp = 8888.0;
-float internalHumid = 8888.0;
-float gpsLat = 8888.0;
-float gpsLong = 8888.0;
+float internalTemp = 888.0;
+float internalHumid = 888.0;
+float gpsLat = 888.0;
+float gpsLong = 888.0;
+float gpsAlti = 888.0;
 float batteryLevel = 0.0;
 int robotStatus = OFFLINE;
 
@@ -132,11 +137,14 @@ bool updateDisplay = true;
 bool waitForKey = false;
 bool restartDriver = false;
 bool telemToView = false;
+bool fixStatus = false;
+
 
 // for non-blocking delay
 unsigned long prevESPNOWMillis = 0;
 unsigned long prevButtonMillis = 0;
 unsigned long prevDisplayMillis = 0;
+unsigned long dcTimeoutMillis = 0;
 
 // to make sure the values are within the 12 bit range
 int xcenter, ycenter, zcenter, dcenter;
@@ -217,9 +225,11 @@ typedef struct ESP32TELE {
   // ==============
 
   // main
+  bool fixStatus;
   float internalTemp, internalHumid;
-  float longitude, latitude;
+  float longitude, latitude, altitude;
   float batteryLevel;
+  float robotSpeed, robotAccel;
   int robotStatus;
 
   // base
@@ -251,6 +261,9 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 // callback function that will be executed when data is received, passes all values from the controller to the respective variables
 void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
   memcpy(&tele, incomingData, sizeof(tele));
+
+  dcTimeoutMillis = millis();
+
   if (tele.deviceID == BASE_TELEM){
     targetRPM[0] = tele.targetRPM[0];
     targetRPM[1] = tele.targetRPM[1];
@@ -260,10 +273,16 @@ void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
     measuredRPM[1] = tele.measuredRPM[1];
     measuredRPM[2] = tele.measuredRPM[2];
     measuredRPM[3] = tele.measuredRPM[3];
+    robotSpeed = tele.robotSpeed;
+    robotAccel = tele.robotAccel;
   }
   else if (tele.deviceID == MAIN_TELEM){
     internalTemp = tele.internalTemp;
     internalHumid = tele.internalHumid;
+    gpsLat = tele.latitude;
+    gpsLong = tele.longitude;
+    gpsAlti = tele.altitude;
+    fixStatus = tele.fixStatus;
     batteryLevel = tele.batteryLevel;
     robotStatus = tele.robotStatus;
   }
@@ -281,7 +300,7 @@ void normalDisplay(){
   // Control mode
   display.setTextColor(SH110X_WHITE);
   display.setCursor(0, 0);
-  display.print("CTRL:");
+  display.print("CT:");
   display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
   if (autoOrManual){
     display.print("AUTO");
@@ -292,8 +311,8 @@ void normalDisplay(){
 
   // Robot status
   display.setTextColor(SH110X_WHITE);
-  display.setCursor(70, 0);
-  display.print("STAT:");
+  display.setCursor(50, 0);
+  display.print("ST:");
   display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
   switch(robotStatus){
     case OFFLINE:
@@ -322,6 +341,14 @@ void normalDisplay(){
       break;
   }
 
+  // Robot status
+  int percentageBatLvl = constrain(map(batteryLevel, 30, 42, 0, 100), 0, 100);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(100, 0);
+  display.print((String)percentageBatLvl + "%");  
+  display.print(percentageBatLvl < LOW_BATTERY_LEVEL ? "!" : "");
+
+
   display.drawLine(0, 10, 128, 10, SH110X_WHITE);
 
 
@@ -331,10 +358,12 @@ void normalDisplay(){
 
   // Input controls display and input pop-ups
   if (!resetOdom && !restartDriver){
-    display.drawLine(96, 15, 96 + map(POT1_Pos, 0, 255, 0, 28), 15, SH110X_WHITE);
-    display.drawCircle(110, 40, 16, SH110X_WHITE);
-    display.drawCircle(110 + (int)(xPos * 10), 40 - (int)(yPos * 10), 1, SH110X_WHITE);
-    display.drawCircle(110 - (int)(wPos * 15), 20, 1, SH110X_WHITE);
+    if (!telemToView){
+      display.drawLine(96, 15, 96 + map(POT1_Pos, 0, 255, 0, 28), 15, SH110X_WHITE);
+      display.drawCircle(110, 40, 16, SH110X_WHITE);
+      display.drawCircle(110 + (int)(xPos * 10), 40 - (int)(yPos * 10), 1, SH110X_WHITE);
+      display.drawCircle(110 - (int)(wPos * 15), 20, 1, SH110X_WHITE);
+    }
   }
   // reset odom pop up
   else if (resetOdom){
@@ -359,34 +388,42 @@ void normalDisplay(){
     // Front Left Wheel speed
     display.setTextColor(SH110X_WHITE);
     display.setCursor(0, 13);
-    display.print("FLW:");
+    display.print("WHEEL SPD:");
+    display.setCursor(0, 23);
     display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
     display.print((int)measuredRPM[0]);
-    display.print(" RPM");   
+    display.print("RPM");   
 
     // Front Right Wheel speed
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(0, 23);
-    display.print("FRW:");
-    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.setCursor(50, 23);
     display.print((int)measuredRPM[1]);
-    display.print(" RPM");   
+    display.print("RPM");   
 
     // Back Left Wheel speed
-    display.setTextColor(SH110X_WHITE);
     display.setCursor(0, 33);
-    display.print("BLW:");
-    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
     display.print((int)measuredRPM[2]);
-    display.print(" RPM"); 
+    display.print("RPM"); 
 
     // Back Right Wheel speed
+    display.setCursor(50, 33);
+    display.print((int)measuredRPM[3]);
+    display.print("RPM");
+
+    // Robot Speed
     display.setTextColor(SH110X_WHITE);
     display.setCursor(0, 43);
-    display.print("BRW:");
+    display.print("VEL:");
     display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print((int)measuredRPM[3]);
-    display.print(" RPM");    
+    display.print(robotSpeed);
+    display.print("m/s");
+
+    // Robot Accel
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(0, 53);
+    display.print("ACC:");
+    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.print(robotAccel);
+    display.print("m/s2");
 
   }
 
@@ -398,41 +435,45 @@ void normalDisplay(){
     display.setCursor(0, 13);
     display.print("T:");
     display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print((String)internalTemp);
-    display.print(" C");
+    display.print(internalTemp == 888.0 ? "-" : (String)internalTemp + "C");
 
     // Humidity
     display.setTextColor(SH110X_WHITE);
     display.setCursor(0, 23);
     display.print("H:");
     display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print((String)internalHumid);
-    display.print(" RH");
+    display.print(internalHumid == 888.0 ? "-" : (String)internalHumid + " RH");
+  
 
-    // Longitude
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(0, 33);
-    display.print("Long:");
-    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print((String)gpsLong);
+    //if (fixStatus){
+      // Longitude
+      display.setTextColor(SH110X_WHITE);
+      display.setCursor(0, 33);
+      display.print("Long:");
+      display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+      display.print((String)gpsLong);
 
-    // Latitude
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(0, 43);
-    display.print("Lat:");
-    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print((String)gpsLat);
+      // Latitude
+      display.setTextColor(SH110X_WHITE);
+      display.setCursor(0, 43);
+      display.print("Lat:");
+      display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+      display.print((String)gpsLat);
 
-    // Battery Level
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(0, 53);
-    display.print("B:");
-    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print((String)map(batteryLevel, 30, 42, 0, 100));
-    display.print(" %");
+      // Altitude
+      display.setTextColor(SH110X_WHITE);
+      display.setCursor(0, 53);
+      display.print("Alti:");
+      display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+      display.print((String)gpsAlti);      
+    //}
+    // else{
+      // Fix message
+      display.setTextColor(SH110X_WHITE);
+      display.setCursor(80, 33);
+      display.print("Wait GPS");
+    // }
   }
-
-
   display.display();
 }
 
@@ -458,48 +499,34 @@ void buzzerStatus(){
 
   else{
     prevBuzzer2Millis = currMillis;
-    if (batteryLevel < DANGEROUS_BATTERY_LEVEL){
-      if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 0){
-        ledcWriteNote(0, NOTE_G, 5);
-        buzzerSequence = 1;
-        prevBuzzerMillis = currMillis;
-      }
-      else if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 1){
-        ledcWriteNote(0, NOTE_E, 5);
-        buzzerSequence = 0;
-        prevBuzzerMillis = currMillis;
-      }   
-    }
 
-    else if (batteryLevel < LOW_BATTERY_LEVEL && !playOnce){
-      if (buzzerSequence == 0){
-        ledcWriteNote(0, NOTE_G, 5);
-        buzzerSequence = 1;
+    if (currMillis - dcTimeoutMillis <= NO_SIGNAL_TIMEFRAME){
+      if (batteryLevel < LOW_BATTERY_LEVEL){
+        if (buzzerSequence == 0){
+          ledcWriteNote(0, NOTE_G, 5);
+          buzzerSequence = 1;
+        }
+        else if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 1){
+          ledcWriteNote(0, NOTE_E, 5);
+          buzzerSequence = 2;
+          prevBuzzerMillis = currMillis;
+        }
+        else if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 2){
+          buzzerSequence = 0;
+          prevBuzzerMillis = currMillis;
+        }
       }
-      else if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 1){
-        ledcWriteNote(0, NOTE_E, 5);
-        buzzerSequence = 2;
+
+      else{
         prevBuzzerMillis = currMillis;
-      }
-      else if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 2){
-        playOnce = true;
-        buzzerSequence = 0;
+        ledcWrite(0, 0);
       }
     }
-
-    else if (batteryLevel > LOW_BATTERY_LEVEL){
-      prevBuzzerMillis = currMillis;
-      playOnce = false;
-      ledcWrite(0, 0);
-    }
-
     else{
-      prevBuzzerMillis = currMillis;
       ledcWrite(0, 0);
     }
   }
 }
-
 
 // check for initial position of both joysticks
 void calibrate() {
@@ -643,6 +670,7 @@ void setup() {
 
 void loop() {
   unsigned long currMillis = millis();       // count the time the ESP32 has stayed powered on
+
 
   // averaging filter for joysticks and potentiometers
   Xtotal -= Xreadings[XreadIndex];

@@ -50,7 +50,10 @@
 #define motorMaxRPM 300  // RPM
 #define motorMinPWM 0
 #define noOfMotors 4
-
+#define wheelSeparationWidth 0.255  // Measured from left side of wheels to right side of wheels in meters
+#define wheelSeparationLength 0.213
+#define wheelRadius 0.065
+#define PI 3.142
 
 // ||==============================||
 // ||           VARIABLES          ||
@@ -115,9 +118,11 @@ typedef struct ESP32TELE {
   // ==============
 
   // main
+  bool fixStatus;
   float internalTemp, internalHumid;
-  float longitude, latitude;
+  float longitude, latitude, altitude;
   float batteryLevel;
+  float robotSpeed, robotAccel;
   int robotStatus;
 
   // base
@@ -378,6 +383,9 @@ void sendCmdVel(){
 
 void readWheelSpeeds(){
   unsigned long currMillis = millis();
+  float robotSpeed = 0.0, robotAccel = 0.0;
+  static unsigned long prevSpeedMillis = 0;
+  static float prevRobotSpeed = 0.0;
 
   canSendSDO(TX_ID_1, -1, 0x606C, 0x01, 0x00);
   canReceiveSDO(true);
@@ -393,11 +401,22 @@ void readWheelSpeeds(){
   analogWrite(blLEDPin, (int)(abs(velocity[2])));
   analogWrite(brLEDPin, (int)(abs(velocity[3])));
 
+  robotSpeed = (-velocity[0] + velocity[1] - velocity[2] + velocity[3]) * ((2 * PI) / 60) *(wheelRadius / 4.0);
+  robotAccel = (robotSpeed - prevRobotSpeed) / ((currMillis - prevSpeedMillis) / 1000.0);
+  prevRobotSpeed = robotSpeed;
+  prevSpeedMillis = currMillis;
+
   base.deviceID = BASE_TELEM;
+  base.targetRPM[0] = mappedTarget[0] * direction[0];
+  base.targetRPM[1] = mappedTarget[1] * direction[1];
+  base.targetRPM[2] = mappedTarget[2] * direction[2];
+  base.targetRPM[3] = mappedTarget[3] * direction[3];
   base.measuredRPM[0] = velocity[0];
   base.measuredRPM[1] = velocity[1];
   base.measuredRPM[2] = velocity[2];
   base.measuredRPM[3] = velocity[3];
+  base.robotSpeed = robotSpeed;
+  base.robotAccel = robotAccel;
 
   if (currMillis - prevESPNOWMillis >= ESPNOW_TIMEFRAME){
     esp_err_t toRemote = esp_now_send(broadcastAddress, (uint8_t *)&base, sizeof(base));

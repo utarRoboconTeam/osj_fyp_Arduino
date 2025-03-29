@@ -81,7 +81,9 @@
 #define noOfMotors 4
 #define motorMaxPWM 255
 #define motorMinPWM -motorMaxPWM
-#define wheelSeparation 0.35  // Measured from left side of wheels to right side of wheels in meters
+#define wheelSeparationWidth 0.255  // Measured from left side of wheels to right side of wheels in meters
+#define wheelSeparationLength 0.213
+#define wheelRadius 0.065
 
 // Battery constants
 #define DANGEROUS_BATTERY_LEVEL 10
@@ -137,6 +139,7 @@ bool autoOrManual = true;  // default is auto mode
 bool resetOdom = false;
 bool wasSwitchedToManual = false;
 bool waitForKey = false;
+bool fixStatus = false;
 
 // Motor speed variables
 // "P" stands for PWM
@@ -160,6 +163,8 @@ float measuredRPM[noOfMotors] = { 0, 0, 0, 0 };
 float x = 0;
 float y = 0;
 float w = 0;
+float robotSpeed = 0;
+float robotAccel = 0;
 
 // IMU data
 float roll = 0.0;
@@ -173,13 +178,14 @@ float yAccel = 0.0;
 float zAccel = 0.0;
 
 // gps coordinates
-float gpsLat = 8888.0;
-float gpsLong = 8888.0;
+float gpsLat = 888.0;
+float gpsLong = 888.0;
+float gpsAlti = 888.0;
 
 // DHT11
-float internalTemp = 8888.0;
-float internalHumid = 8888.0;
-float batteryLevel = 8888.0;
+float internalTemp = 888.0;
+float internalHumid = 888.0;
+float batteryLevel = 888.0;
 
 // variables used for serial data parsing
 int indexCmd = 0;  // index variable for array
@@ -227,6 +233,7 @@ typedef struct ESP32TELE {
   float internalTemp, internalHumid;
   float longitude, latitude, altitude;
   float batteryLevel;
+  float robotSpeed, robotAccel;
   int robotStatus;
 
   // base
@@ -325,9 +332,13 @@ void sendDataToPC() {
   Serial.print(":");
   Serial.print(waitForKey);
   Serial.print(":");
+  Serial.print(fixStatus);
+  Serial.print("/");
   Serial.print(gpsLat);
   Serial.print("/");
   Serial.print(gpsLong);
+  Serial.print("/");
+  Serial.print(gpsAlti);
   Serial.print(":");
   Serial.print(roll);
   Serial.print("/");
@@ -361,10 +372,10 @@ void skidSteeringKinematics(float yInput, float wInput, int* FLWOut, int* FRWOut
   // Mecanum wheel robot kinematics code
   // Take note that with the current wiring
   // the formula may be different from what you have seen online
-  *FLWOut = constrain((-yInput + wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
-  *FRWOut = constrain((yInput + wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
-  *BLWOut = constrain((yInput + wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
-  *BRWOut = constrain((-yInput + wheelSeparation * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
+  *FLWOut = constrain((-yInput + wheelSeparationWidth * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
+  *FRWOut = constrain((yInput + wheelSeparationWidth * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
+  *BLWOut = constrain((yInput + wheelSeparationWidth * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
+  *BRWOut = constrain((-yInput + wheelSeparationWidth * wInput) * motorMaxPWM, motorMinPWM, motorMaxPWM);
 
   analogWrite(flLEDPin, abs(*FLWOut));
   analogWrite(frLEDPin, abs(*FRWOut));
@@ -528,6 +539,34 @@ void getDHTData(){
   }
 }
 
+void getGPSData(){
+  static bool locationValid = false;
+  static bool altitudeValid = false;
+
+  if (gps.location.isValid()){
+    locationValid = true;
+    gpsLat = gps.location.lat();
+    gpsLong = gps.location.lng(); 
+  }
+  else{
+    locationValid = false;
+    gpsLat = 888.0;
+    gpsLong = 888.0; 
+  }
+
+  if (gps.altitude.isValid()){
+    altitudeValid = true;
+    gpsAlti = gps.altitude.meters();
+  }
+  else{
+    altitudeValid = false;
+    gpsAlti = 888.0;
+  }
+
+  fixStatus = (locationValid && altitudeValid) ? true : false;
+  //fixStatus = true;
+}
+
 float getBatteryData(){
   const int r1 = 1E6;
   const int r2 = 68E3;
@@ -542,6 +581,7 @@ float getBatteryData(){
 }
 
 void readWheelSpeeds(){
+
   // You can set custom timeout, default is 1000
   if(ESP32Can.readFrame(rxFrame, 0)) {
 
@@ -983,10 +1023,11 @@ void loop() {
     prevSerialMillis = currMillis;
   }
 
-    // Send odometry and other data to PC via serial
+  // Send odometry and other data to PC via serial
   if (currMillis - prevSensorMillis >= SENSOR_TIMEFRAME){
     getIMUData();   
     getDHTData();
+    getGPSData();
     batteryLevel = getBatteryData();
     prevSensorMillis = currMillis;
   }
@@ -998,6 +1039,8 @@ void loop() {
     head.internalHumid = internalHumid;
     head.longitude = gpsLong;
     head.latitude = gpsLat;
+    head.altitude = gpsAlti;
+    head.fixStatus = fixStatus;
     head.batteryLevel = batteryLevel;
     head.robotStatus = ledStatusCode;
     esp_err_t toController = esp_now_send(broadcastAddress, (uint8_t *)&head, sizeof(head));
@@ -1006,6 +1049,5 @@ void loop() {
 
   // Change the led colour of the robot depending on the modes
   ledStatus(ledStatusCode);    
-
 
 }
