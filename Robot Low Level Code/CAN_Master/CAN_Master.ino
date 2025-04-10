@@ -61,8 +61,8 @@
 #define batteryPin 36
 
 // GPS pins
-#define RXPin 18
-#define TXPin 19
+#define RXPin 19
+#define TXPin 18
 #define GPSBaud 9600
 
 // Time constants
@@ -86,7 +86,7 @@
 #define wheelRadius 0.065
 
 // Battery constants
-#define DANGEROUS_BATTERY_LEVEL 10
+#define LOW_BATTERY_LEVEL 25
 
 #define RX_ID_1 0x581
 #define RX_ID_2 0x582
@@ -181,6 +181,7 @@ float zAccel = 0.0;
 float gpsLat = 888.0;
 float gpsLong = 888.0;
 float gpsAlti = 888.0;
+int gpsNoOfSatellites = 0;
 
 // DHT11
 float internalTemp = 888.0;
@@ -232,6 +233,7 @@ typedef struct ESP32TELE {
   bool fixStatus;
   float internalTemp, internalHumid;
   float longitude, latitude, altitude;
+  int noOfSatellites;
   float batteryLevel;
   float robotSpeed, robotAccel;
   int robotStatus;
@@ -239,6 +241,8 @@ typedef struct ESP32TELE {
   // base
   float targetRPM[noOfMotors];
   float measuredRPM[noOfMotors];
+  float motorTemp[noOfMotors];
+  float motorDriverTemp[noOfMotors / 2];
 
 } ESP32TELE;
 
@@ -334,11 +338,11 @@ void sendDataToPC() {
   Serial.print(":");
   Serial.print(fixStatus);
   Serial.print("/");
-  Serial.print(gpsLat);
+  Serial.print(gpsLat, 6);
   Serial.print("/");
-  Serial.print(gpsLong);
+  Serial.print(gpsLong, 6);
   Serial.print("/");
-  Serial.print(gpsAlti);
+  Serial.print(gpsAlti, 6);
   Serial.print(":");
   Serial.print(roll);
   Serial.print("/");
@@ -554,6 +558,11 @@ void getGPSData(){
     gpsLong = 888.0; 
   }
 
+  gpsNoOfSatellites = gps.satellites.value();
+
+  if (gps.satellites.isValid()){
+  }
+
   if (gps.altitude.isValid()){
     altitudeValid = true;
     gpsAlti = gps.altitude.meters();
@@ -626,7 +635,7 @@ void buzzerStatus(){
 
   float mappedBatteryLevel = map(batteryLevel, 30, 42, 0, 100);
 
-  if (mappedBatteryLevel < DANGEROUS_BATTERY_LEVEL){
+  if (mappedBatteryLevel < LOW_BATTERY_LEVEL){
     if (currMillis - prevBuzzerMillis >= CHANGE_TONE_TIMEFRAME && buzzerSequence == 0){
       ledcWriteNote(0, NOTE_D, 5);
       buzzerSequence = 1;
@@ -640,7 +649,10 @@ void buzzerStatus(){
   }
 
   else{
-    ledcWrite(0, 0);
+    // prevent it from interfering with the dc status
+    if (currMillis - dcTimeoutMillis < DC_TIMEFRAME){
+      ledcWrite(0, 0);
+    }
   }
 }
 
@@ -854,10 +866,12 @@ void loop() {
       delay(10);
     }
   }
-  else{
-    buzzerStatus();
-  }
 
+  buzzerStatus();
+
+  if (gpsSerial.available()){
+    gps.encode(gpsSerial.read());
+  }
   // ========================================
   //   AUTO CONTROL - Serial commands only
   // ========================================
@@ -1043,6 +1057,8 @@ void loop() {
     head.fixStatus = fixStatus;
     head.batteryLevel = batteryLevel;
     head.robotStatus = ledStatusCode;
+    head.noOfSatellites = gpsNoOfSatellites;
+    
     esp_err_t toController = esp_now_send(broadcastAddress, (uint8_t *)&head, sizeof(head));
     prevESPNOWMillis = currMillis;
   }

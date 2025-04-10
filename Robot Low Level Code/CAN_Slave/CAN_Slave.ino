@@ -84,6 +84,10 @@ int direction[noOfMotors] = { 0, 0, 0, 0 };       // target direction of the mot
 // Velocity calculations
 float velocity[noOfMotors] = { 0, 0, 0, 0 };
 
+// Motor and motor driver temperatures
+float motorTemp[noOfMotors] = { 0, 0, 0, 0 };
+float motorDriverTemp[noOfMotors / 2] = { 0, 0 };
+
 // Flags to determine whether operations are done or not
 bool gotCmdVelData = false; // check for presence of cmd vel data
 bool restartDriver = false;
@@ -92,7 +96,6 @@ bool restartDriver = false;
 unsigned long prevDCTimeoutMillis = 0;
 unsigned long prevCANMillis = 0;
 unsigned long prevESPNOWMillis = 0;
-
 
 // ------------------
 // OBJECTS
@@ -121,6 +124,7 @@ typedef struct ESP32TELE {
   bool fixStatus;
   float internalTemp, internalHumid;
   float longitude, latitude, altitude;
+  int noOfSatellites;
   float batteryLevel;
   float robotSpeed, robotAccel;
   int robotStatus;
@@ -128,6 +132,8 @@ typedef struct ESP32TELE {
   // base
   float targetRPM[noOfMotors];
   float measuredRPM[noOfMotors];
+  float motorTemp[noOfMotors];
+  float motorDriverTemp[noOfMotors / 2];
 
 } ESP32TELE;
 
@@ -257,68 +263,98 @@ void canSendSDO(uint16_t nodeID, int byteLength, uint16_t index, uint8_t subInde
 
 }
 
-void canReceiveSDO(bool readWheelSpeed){
+void canReceiveSDO(){
   // You can set custom timeout, default is 1000
   if(ESP32Can.readFrame(rxFrame, 0)) {
-
-      // If we just want to read wheel speeds
-      if (readWheelSpeed){
-        int16_t checkDataType = (rxFrame.data[2] << 8) | (rxFrame.data[1]);
-        // if the wheel speed data is coming from node 1
-        if (rxFrame.identifier == RX_ID_1){
-          // ensure that you are actually getting wheel speed data
-          if (checkDataType == 0x606C){
-            // FLW speed
-            if (rxFrame.data[3] == 1){
-              velocity[0] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
-            }
-            // FRW speed
-            else if (rxFrame.data[3] == 2){
-              velocity[1] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
-            }
-          }          
+      int16_t checkDataType = (rxFrame.data[2] << 8) | (rxFrame.data[1]);
+      
+      // if data is coming from node 1
+      if (rxFrame.identifier == RX_ID_1){
+        // if we got wheel speed data
+        if (checkDataType == 0x606C){
+          // FLW speed
+          if (rxFrame.data[3] == 1){
+            velocity[0] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+          }
+          // FRW speed
+          else if (rxFrame.data[3] == 2){
+            velocity[1] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+          }
         }
 
-        // if the wheel speed data is coming from node 2
-        else if (rxFrame.identifier == RX_ID_2){
-          // ensure that you are actually getting wheel speed data
-          if (checkDataType == 0x606C){
-            // take note that the motor driver in the robot is flipped
-            // so need to invert on the software side
+        // if we got motor temperature data
+        else if (checkDataType == 0x2032){
+          // FLW temperature
+          if (rxFrame.data[3] == 1){
+            motorTemp[0] = ((rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+          }
+          // FRW temperature
+          else if (rxFrame.data[3] == 2){
+            motorTemp[1] = ((rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+          }
+          // Front motor driver temperature
+          else if (rxFrame.data[3] == 3){
+            motorDriverTemp[0] = ((rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+          }
+        }
 
-            // BLW speed
-            if (rxFrame.data[3] == 1){
-              velocity[3] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
-            }
-            // BRW speed
-            else if (rxFrame.data[3] == 2){
-              velocity[2] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
-            }
+      }
+
+      // if the wheel speed data is coming from node 2
+      else if (rxFrame.identifier == RX_ID_2){
+        // If we got wheel speed data
+        if (checkDataType == 0x606C){
+          // take note that the motor driver in the robot is flipped
+          // so need to invert on the software side
+
+          // BLW speed
+          if (rxFrame.data[3] == 1){
+            velocity[3] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+          }
+          // BRW speed
+          else if (rxFrame.data[3] == 2){
+            velocity[2] = ((rxFrame.data[7] << 24) | (rxFrame.data[6] << 16) | (rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+          }
+        }
+        
+        // if we got motor temperature data
+        else if (checkDataType == 0x2032){
+          // BLW temperature
+          if (rxFrame.data[3] == 1){
+            motorTemp[3] = ((rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+          }
+          // BRW temperature
+          else if (rxFrame.data[3] == 2){
+            motorTemp[2] = ((rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
+          }
+          // Back motor driver temperature
+          else if (rxFrame.data[3] == 3){
+            motorDriverTemp[1] = ((rxFrame.data[5] << 8) | (rxFrame.data[4])) * 0.1; // returned value unit is 0.1 RPM
           }
         }
       }
+      
 
       // If we are only checking what data are we receiving from the nodes
-      else{
-        // Comment out if too many frames
-        Serial.printf("Received frame: %03X  \r\n", rxFrame.identifier);
-        Serial.print(rxFrame.data[0], HEX);
-        Serial.print(" ");
-        Serial.print(rxFrame.data[1], HEX);
-        Serial.print(" ");
-        Serial.print(rxFrame.data[2], HEX);
-        Serial.print(" ");
-        Serial.print(rxFrame.data[3], HEX);
-        Serial.print(" ");
-        Serial.print(rxFrame.data[4], HEX);
-        Serial.print(" ");
-        Serial.print(rxFrame.data[5], HEX);
-        Serial.print(" ");
-        Serial.print(rxFrame.data[6], HEX);
-        Serial.print(" ");
-        Serial.print(rxFrame.data[7], HEX);
-        Serial.print(" ");        
-      }
+      // Comment out if too many frames
+      // Serial.printf("Received frame: %03X  \r\n", rxFrame.identifier);
+      // Serial.print(rxFrame.data[0], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[1], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[2], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[3], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[4], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[5], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[6], HEX);
+      // Serial.print(" ");
+      // Serial.print(rxFrame.data[7], HEX);
+      // Serial.print(" ");        
+    
 
   }
 }
@@ -334,7 +370,7 @@ void readCmdVel(){
         // They have a deadzone where the input within that deadzone will not move the motor
         // so we need to offset it
         target[i] = map(rxFrame.data[i], 0, 255, motorMinPWM, 255); 
-        mappedTarget[i] =  map(abs(target[i]), motorMinPWM, 255, 0, motorMaxRPM);
+        mappedTarget[i] = map(abs(target[i]), motorMinPWM, 255, 0, motorMaxRPM);
         direction[i] = ((rxFrame.data[i + 4] == 0) ? -1 : 1);      
       }
       gotCmdVelData = true;
@@ -381,20 +417,35 @@ void sendCmdVel(){
 }
 
 
-void readWheelSpeeds(){
+void readSpeedTemp(){
   unsigned long currMillis = millis();
   float robotSpeed = 0.0, robotAccel = 0.0;
   static unsigned long prevSpeedMillis = 0;
   static float prevRobotSpeed = 0.0;
 
+  // Query motor speeds
   canSendSDO(TX_ID_1, -1, 0x606C, 0x01, 0x00);
-  canReceiveSDO(true);
+  canReceiveSDO();
   canSendSDO(TX_ID_1, -1, 0x606C, 0x02, 0x00);
-  canReceiveSDO(true);
+  canReceiveSDO();
   canSendSDO(TX_ID_2, -1, 0x606C, 0x01, 0x00);
-  canReceiveSDO(true);
+  canReceiveSDO();
   canSendSDO(TX_ID_2, -1, 0x606C, 0x02, 0x00);
-  canReceiveSDO(true);
+  canReceiveSDO();
+
+  // Query motor and motor driver temperatures
+  canSendSDO(TX_ID_1, -1, 0x2032, 0x01, 0x00);
+  canReceiveSDO();
+  canSendSDO(TX_ID_1, -1, 0x2032, 0x02, 0x00);
+  canReceiveSDO();
+  canSendSDO(TX_ID_1, -1, 0x2032, 0x03, 0x00);
+  canReceiveSDO();
+  canSendSDO(TX_ID_2, -1, 0x2032, 0x01, 0x00);
+  canReceiveSDO();
+  canSendSDO(TX_ID_2, -1, 0x2032, 0x02, 0x00);
+  canReceiveSDO();
+  canSendSDO(TX_ID_2, -1, 0x2032, 0x03, 0x00);
+  canReceiveSDO();
 
   analogWrite(flLEDPin, (int)(abs(velocity[0])));
   analogWrite(frLEDPin, (int)(abs(velocity[1])));
@@ -415,6 +466,12 @@ void readWheelSpeeds(){
   base.measuredRPM[1] = velocity[1];
   base.measuredRPM[2] = velocity[2];
   base.measuredRPM[3] = velocity[3];
+  base.motorTemp[0] = motorTemp[0];
+  base.motorTemp[1] = motorTemp[1];
+  base.motorTemp[2] = motorTemp[2];
+  base.motorTemp[3] = motorTemp[3];
+  base.motorDriverTemp[0] = motorDriverTemp[0];
+  base.motorDriverTemp[1] = motorDriverTemp[1];
   base.robotSpeed = robotSpeed;
   base.robotAccel = robotAccel;
 
@@ -601,7 +658,7 @@ void loop() {
     prevDCTimeoutMillis = currMillis;
   // Get the command velocities from CAN bus
     sendCmdVel();
-    readWheelSpeeds();
+    readSpeedTemp();
   }
 
   // Safety feature where if there is no CAN data received, turn off the motors

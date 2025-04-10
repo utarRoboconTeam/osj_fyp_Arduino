@@ -119,6 +119,8 @@ int telemReading, prevTelemReading;
 float targetRPM[noOfMotors] = {0.0, 0.0, 0.0, 0.0};
 float measuredRPM[noOfMotors] = {0.0, 0.0, 0.0, 0.0};
 float robotSpeed = 0.0, robotAccel = 0.0;
+float motorTemp[noOfMotors] = {0.0, 0.0, 0.0, 0.0};
+float motorDriverTemp[noOfMotors / 2] = {0.0, 0.0};
 
 
 // Main controller telemetry data
@@ -127,6 +129,7 @@ float internalHumid = 888.0;
 float gpsLat = 888.0;
 float gpsLong = 888.0;
 float gpsAlti = 888.0;
+int noOfSatellites = 0;
 float batteryLevel = 0.0;
 int robotStatus = OFFLINE;
 
@@ -228,6 +231,7 @@ typedef struct ESP32TELE {
   bool fixStatus;
   float internalTemp, internalHumid;
   float longitude, latitude, altitude;
+  int noOfSatellites;
   float batteryLevel;
   float robotSpeed, robotAccel;
   int robotStatus;
@@ -235,6 +239,8 @@ typedef struct ESP32TELE {
   // base
   float targetRPM[noOfMotors];
   float measuredRPM[noOfMotors];
+  float motorTemp[noOfMotors];
+  float motorDriverTemp[noOfMotors / 2];
 
 } ESP32TELE;
 
@@ -275,6 +281,12 @@ void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
     measuredRPM[3] = tele.measuredRPM[3];
     robotSpeed = tele.robotSpeed;
     robotAccel = tele.robotAccel;
+    motorTemp[0] = tele.motorTemp[0];
+    motorTemp[1] = tele.motorTemp[1];
+    motorTemp[2] = tele.motorTemp[2];
+    motorTemp[3] = tele.motorTemp[3];
+    motorDriverTemp[0] = tele.motorDriverTemp[0];
+    motorDriverTemp[1] = tele.motorDriverTemp[1];
   }
   else if (tele.deviceID == MAIN_TELEM){
     internalTemp = tele.internalTemp;
@@ -282,6 +294,7 @@ void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
     gpsLat = tele.latitude;
     gpsLong = tele.longitude;
     gpsAlti = tele.altitude;
+    noOfSatellites = tele.noOfSatellites;
     fixStatus = tele.fixStatus;
     batteryLevel = tele.batteryLevel;
     robotStatus = tele.robotStatus;
@@ -359,10 +372,9 @@ void normalDisplay(){
   // Input controls display and input pop-ups
   if (!resetOdom && !restartDriver){
     if (!telemToView){
-      display.drawLine(96, 15, 96 + map(POT1_Pos, 0, 255, 0, 28), 15, SH110X_WHITE);
-      display.drawCircle(110, 40, 16, SH110X_WHITE);
-      display.drawCircle(110 + (int)(xPos * 10), 40 - (int)(yPos * 10), 1, SH110X_WHITE);
-      display.drawCircle(110 - (int)(wPos * 15), 20, 1, SH110X_WHITE);
+      display.drawLine(55, 23, 55 + map(POT1_Pos, 0, 255, 0, 20), 23, SH110X_WHITE);
+      display.drawCircle(64, 33, 7, SH110X_WHITE);
+      display.drawCircle(64 - (int)(wPos * 6),  33 - (int)(yPos * 6), 1, SH110X_WHITE);
     }
   }
   // reset odom pop up
@@ -384,46 +396,50 @@ void normalDisplay(){
 
 
   // switch between which telemetry data to view
+  // View base telemetry
   if (!telemToView){
     // Front Left Wheel speed
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(0, 13);
-    display.print("WHEEL SPD:");
-    display.setCursor(0, 23);
+    //display.setTextColor(SH110X_WHITE);
     display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print((int)measuredRPM[0]);
-    display.print("RPM");   
+
+    display.setCursor(50, 13);
+    display.print(String(motorDriverTemp[0], 1));
+
+    //display.print("WHEEL (RPM/" + String(char(248)) + "C):");
+    display.setCursor(0, 23);
+    display.print(String((int)measuredRPM[0]) + '/' + String(motorTemp[0], 1));
 
     // Front Right Wheel speed
-    display.setCursor(50, 23);
-    display.print((int)measuredRPM[1]);
-    display.print("RPM");   
+    display.setCursor(80, 23);
+    display.print(String((int)measuredRPM[1]) + '/' + String(motorTemp[1], 1));
 
     // Back Left Wheel speed
     display.setCursor(0, 33);
-    display.print((int)measuredRPM[2]);
-    display.print("RPM"); 
+    display.print(String((int)measuredRPM[2]) + '/' + String(motorTemp[2], 1));
 
     // Back Right Wheel speed
-    display.setCursor(50, 33);
-    display.print((int)measuredRPM[3]);
-    display.print("RPM");
+    display.setCursor(80, 33);
+    display.print(String((int)measuredRPM[3]) + '/' + String(motorTemp[3], 1));
+
+    display.setCursor(50, 43);
+    display.print(String(motorDriverTemp[1], 1));
+
 
     // Robot Speed
     display.setTextColor(SH110X_WHITE);
-    display.setCursor(0, 43);
+    display.setCursor(0, 53);
     display.print("VEL:");
     display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
     display.print(robotSpeed);
     display.print("m/s");
 
-    // Robot Accel
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(0, 53);
-    display.print("ACC:");
-    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-    display.print(robotAccel);
-    display.print("m/s2");
+    // // Robot Accel
+    // display.setTextColor(SH110X_WHITE);
+    // display.setCursor(0, 53);
+    // display.print("ACC:");
+    // display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    // display.print(robotAccel);
+    // display.print("m/s2");
 
   }
 
@@ -439,40 +455,46 @@ void normalDisplay(){
 
     // Humidity
     display.setTextColor(SH110X_WHITE);
-    display.setCursor(0, 23);
+    display.setCursor(64, 13);
     display.print("H:");
     display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
     display.print(internalHumid == 888.0 ? "-" : (String)internalHumid + " RH");
   
-
-    //if (fixStatus){
+    // Number of Satellites
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(0, 23);
+    display.print("Num. Sat.:");
+    display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
+    display.print(String(noOfSatellites));
+    
+    if (fixStatus){
       // Longitude
       display.setTextColor(SH110X_WHITE);
       display.setCursor(0, 33);
       display.print("Long:");
       display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-      display.print((String)gpsLong);
+      display.print(String(gpsLong, 6));
 
       // Latitude
       display.setTextColor(SH110X_WHITE);
       display.setCursor(0, 43);
       display.print("Lat:");
       display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-      display.print((String)gpsLat);
+      display.print(String(gpsLat, 6));
 
       // Altitude
       display.setTextColor(SH110X_WHITE);
       display.setCursor(0, 53);
       display.print("Alti:");
       display.setTextColor(SH110X_BLACK, SH110X_WHITE); // 'inverted' text
-      display.print((String)gpsAlti);      
-    //}
-    // else{
-      // Fix message
+      display.print(String(gpsAlti, 6));      
+    }
+    else{
+      // Wait for fix message
       display.setTextColor(SH110X_WHITE);
-      display.setCursor(80, 33);
-      display.print("Wait GPS");
-    // }
+      display.setCursor(0, 33);
+      display.print("Wait for GPS fix");
+    }
   }
   display.display();
 }
